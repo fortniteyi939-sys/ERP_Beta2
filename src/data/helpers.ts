@@ -34,10 +34,24 @@ export function money(value = 0) {
 }
 
 export function statusTone(status: RecordStatus) {
-  if (status === 'Crítico') return 'red'
-  if (status === 'Pendiente' || status === 'Bajo stock') return 'amber'
-  if (status === 'En curso' || status === 'En tránsito') return 'blue'
+  if (status === 'Crítico' || status === 'Rechazada') return 'red'
+  if (status === 'Pendiente' || status === 'Bajo stock' || status === 'Vencida' || status === 'Solicitud' || status === 'Factura') return 'amber'
+  if (status === 'En curso' || status === 'En tránsito' || status === 'Orden' || status === 'Recepción') return 'blue'
   return 'green'
+}
+
+/** IGV del Perú para compras: subtotal sin impuesto + 18%. */
+export const IGV_RATE = 0.18
+export function igvOf(subtotal: number) {
+  return Math.round(subtotal * IGV_RATE * 100) / 100
+}
+export function totalWithIgv(subtotal: number) {
+  return Math.round(subtotal * (1 + IGV_RATE) * 100) / 100
+}
+
+/** Fases de compra que ya tienen la mercadería en almacén. */
+export function purchaseHasStock(status: string) {
+  return status === 'Recepción' || status === 'Factura' || status === 'Pagada'
 }
 
 export function defaultStatus(page: DataPage): RecordStatus {
@@ -49,10 +63,11 @@ export function defaultStatus(page: DataPage): RecordStatus {
 }
 
 export function statusesForPage(page: DataPage): RecordStatus[] {
+  if (page === 'purchases') return ['Solicitud', 'Orden', 'Recepción', 'Factura', 'Pagada']
+  if (page === 'quotes') return ['Pendiente', 'En curso', 'Aprobada', 'Rechazada', 'Vencida', 'Completada']
   if (page === 'inventory') return ['Estable', 'Bajo stock', 'Crítico']
   if (page === 'documents' || page === 'reports') return ['Vigente']
   if (page === 'customers' || page === 'suppliers' || page === 'settings') return ['Activo', 'En curso']
-  if (page === 'purchases') return ['Pendiente', 'En curso', 'En tránsito', 'Completada']
   return ['Pendiente', 'En curso', 'Completada']
 }
 

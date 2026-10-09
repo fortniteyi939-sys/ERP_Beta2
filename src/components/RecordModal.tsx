@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
 import { pageMeta } from '../data/catalog'
-import { defaultStatus, money, statusesForPage } from '../data/helpers'
+import { defaultStatus, money, purchaseHasStock, statusesForPage } from '../data/helpers'
 import { useRecords } from '../context/RecordsContext'
 import { fetchDocumentLines } from '../services/records'
 import type { DataPage, DocumentLine, RecordItem, RecordStatus } from '../types'
@@ -39,12 +39,13 @@ function parseSaleDetail(detail: string): { tipo: SaleDocType; ciudad: string } 
   return { tipo: 'Manual', ciudad: 'Lima' }
 }
 
-/** Ruta de seguimiento de una compra: el inventario se mueve solo al completar. */
+/** Ruta de seguimiento de una compra: el inventario se mueve al llegar a Recepción. */
 const PURCHASE_FLOW = [
-  { status: 'Pendiente', icon: 'schedule' },
-  { status: 'En curso', icon: 'sync' },
-  { status: 'En tránsito', icon: 'local_shipping' },
-  { status: 'Completada', icon: 'check_circle' },
+  { status: 'Solicitud', icon: 'description' },
+  { status: 'Orden', icon: 'shopping_cart' },
+  { status: 'Recepción', icon: 'warehouse' },
+  { status: 'Factura', icon: 'receipt_long' },
+  { status: 'Pagada', icon: 'payments' },
 ] as const
 
 /** Icono de Google (Material Symbols Outlined). Requiere el <link> de index.html. */
@@ -61,15 +62,14 @@ type LineDraft = { selected: boolean; qty: number; price: number }
 export default function RecordModal({ page, record, saving = false, onClose, onSave }: { page: DataPage; record: RecordItem | null; saving?: boolean; onClose: () => void; onSave: (event: FormEvent<HTMLFormElement>) => void }) {
   const meta = pageMeta[page]
   const editing = Boolean(record)
-  const { records } = useRecords()
+  const { records, catalog } = useRecords()
 
-  const hasClientRelation = page === 'sales'
-  const hasSupplierRelation = page === 'purchases' || page === 'inventory'
-  const hasDocumentLines = page === 'sales' || page === 'purchases'
-  const isInventoryOptional = page === 'inventory'
+  const hasClientRelation = page === 'sales' || page === 'quotes'
+  const hasSupplierRelation = page === 'purchases'
+  const hasDocumentLines = page === 'sales' || page === 'purchases' || page === 'quotes'
 
   const initialRelated =
-    page === 'sales' ? (record?.cliente_id ?? '') : hasSupplierRelation ? (record?.proveedor_id ?? '') : ''
+    hasClientRelation ? (record?.cliente_id ?? '') : hasSupplierRelation ? (record?.proveedor_id ?? '') : ''
 
   const [relatedId, setRelatedId] = useState<string>(initialRelated ?? '')
   const [nameValue, setNameValue] = useState<string>(record?.name ?? '')
@@ -88,13 +88,13 @@ export default function RecordModal({ page, record, saving = false, onClose, onS
   const [lines, setLines] = useState<Record<string, LineDraft>>({})
   const [linesLoading, setLinesLoading] = useState(false)
   const [showAllProducts, setShowAllProducts] = useState(false)
-  // Ventas: filtro por proveedor. Sin selección no se lista nada: al elegir
-  // recién aparecen los productos relacionados a ese proveedor.
-  const [supplierFilter, setSupplierFilter] = useState<string>('')
 
   const customers = records.customers
   const suppliers = records.suppliers
   const inventory = records.inventory
+  // Ventas/cotizaciones eligen de MI inventario; compras del CATÁLOGO del proveedor.
+  const lineSource = page === 'purchases' ? catalog : inventory
+  const lineUnitPrice = (item: RecordItem) => (page === 'purchases' ? (item.amount ?? 0) : (item.precio ?? 0))
   const options = hasClientRelation ? customers : hasSupplierRelation ? suppliers : []
 
   const linkedTarget = relatedId ? options.find((item) => item.rowId === relatedId) : undefined
@@ -102,10 +102,7 @@ export default function RecordModal({ page, record, saving = false, onClose, onS
   const handleRelatedChange = (value: string) => {
     setRelatedId(value)
     if (!value) return
-    // En productos el nombre es propio del producto y nunca se hereda del
-    // proveedor: solo se guarda el vínculo (proveedor_id). En ventas/compras
-    // el nombre sí se hereda para mantener coherencia con la FK.
-    if (page === 'inventory') return
+    // El nombre se hereda del registro elegido para mantener coherencia con la FK.
     const target = options.find((item) => item.rowId === value)
     if (target) setNameValue(target.name)
   }
@@ -149,7 +146,7 @@ export default function RecordModal({ page, record, saving = false, onClose, onS
     if (!hasDocumentLines || !record?.rowId) return
     let active = true
     setLinesLoading(true)
-    fetchDocumentLines(page as 'sales' | 'purchases', record.rowId)
+    fetchDocumentLines(page as 'sales' | 'purchases' | 'quotes', record.rowId)
       .then((previous: DocumentLine[]) => {
         if (!active) return
         const draft: Record<string, LineDraft> = {}
@@ -166,24 +163,15 @@ export default function RecordModal({ page, record, saving = false, onClose, onS
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasDocumentLines, record?.rowId])
 
-  // En compras: solo productos del proveedor elegido (los "relacionados a este").
-  // Si el proveedor no tiene productos, se ofrecen todos con aviso.
+  // En compras: solo el CATÁLOGO del proveedor elegido (su oferta, viva o no en
+  // mi inventario). Si aún no tiene nada cargado, se ofrecen todos con aviso.
   const purchaseBase = useMemo(() => {
-    if (page !== 'purchases' || !relatedId || showAllProducts) return inventory
-    const related = inventory.filter((item) => item.proveedor_id === relatedId)
-    return related.length ? related : inventory
-  }, [page, relatedId, showAllProducts, inventory])
+    if (page !== 'purchases' || !relatedId || showAllProducts) return catalog
+    const related = catalog.filter((item) => item.proveedor_id === relatedId)
+    return related.length ? related : catalog
+  }, [page, relatedId, showAllProducts, catalog])
 
-  // En ventas: el selector de proveedor filtra la lista. Sin selección no se
-  // muestra nada hasta elegir (o "Todos" para ver todo el inventario).
-  const saleBase = useMemo(() => {
-    if (page !== 'sales') return inventory
-    if (supplierFilter === 'all') return inventory
-    if (!supplierFilter) return []
-    return inventory.filter((item) => item.proveedor_id === supplierFilter)
-  }, [page, supplierFilter, inventory])
-
-  const baseProducts = page === 'purchases' ? purchaseBase : page === 'sales' ? saleBase : inventory
+  const baseProducts = page === 'purchases' ? purchaseBase : inventory
 
   // No perder lo ya marcado al cambiar el filtro (edición segura): lo
   // seleccionado siempre queda visible aunque el filtro lo oculte.
@@ -195,30 +183,24 @@ export default function RecordModal({ page, record, saving = false, onClose, onS
     )
     if (!selectedIds.size) return baseProducts
     const baseIds = new Set(baseProducts.map((product) => product.rowId))
-    const extras = inventory.filter((product) => product.rowId && selectedIds.has(product.rowId) && !baseIds.has(product.rowId))
+    const extras = lineSource.filter((product) => product.rowId && selectedIds.has(product.rowId) && !baseIds.has(product.rowId))
     return extras.length ? [...baseProducts, ...extras] : baseProducts
-  }, [baseProducts, lines, inventory])
+  }, [baseProducts, lines, lineSource])
 
   const supplierHasRelated = page === 'purchases' && relatedId
-    ? inventory.some((item) => item.proveedor_id === relatedId)
+    ? catalog.some((item) => item.proveedor_id === relatedId)
     : true
-  const saleFilterHasRelated = page === 'sales' && supplierFilter && supplierFilter !== 'all'
-    ? inventory.some((item) => item.proveedor_id === supplierFilter)
-    : true
-  const saleFilterName = page === 'sales' && supplierFilter && supplierFilter !== 'all'
-    ? suppliers.find((item) => item.rowId === supplierFilter)?.name
-    : undefined
 
   const toggleLine = (uuid: string) => {
-    // Al marcar se toma el precio fijo del producto (se define en Inventario,
-    // no se edita por línea).
-    const product = inventory.find((item) => item.rowId === uuid)
+    // Al marcar se toma el precio fijo (del producto en mi inventario o del
+    // catálogo del proveedor en compras; no se edita por línea).
+    const product = lineSource.find((item) => item.rowId === uuid)
     // En ventas no se puede marcar un producto sin stock.
     if (page === 'sales' && (product?.quantity ?? 0) <= 0) {
       const already = Object.prototype.hasOwnProperty.call(lines, uuid) && lines[uuid]?.selected
       if (!already) return
     }
-    const suggested = product?.precio ?? 0
+    const suggested = product ? lineUnitPrice(product) : 0
     const stock = product?.quantity ?? 0
     setLines((current) => {
       if (current[uuid]?.selected) return { ...current, [uuid]: { ...current[uuid], selected: false } }
@@ -255,7 +237,11 @@ export default function RecordModal({ page, record, saving = false, onClose, onS
   const linesTotal = selectedLines.reduce((sum, line) => sum + line.subtotal, 0)
 
   const relationIcon = hasClientRelation ? 'group' : 'factory'
-  const relationLabel = page === 'sales' ? 'Cliente registrado' : page === 'purchases' ? 'Proveedor registrado' : 'Proveedor habitual (opcional)'
+  const relationLabel = hasClientRelation ? 'Cliente registrado' : page === 'purchases' ? 'Proveedor registrado' : 'Proveedor habitual (opcional)'
+  // Completada en cotizaciones solo se alcanza con «Convertir en venta».
+  const statusOptions = page === 'quotes' && record?.status !== 'Completada'
+    ? statusesForPage(page).filter((status) => status !== 'Completada')
+    : statusesForPage(page)
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
@@ -273,16 +259,10 @@ export default function RecordModal({ page, record, saving = false, onClose, onS
                   value={relatedId}
                   onChange={(event) => handleRelatedChange(event.target.value)}
                 >
-                  <option value="">
-                    {isInventoryOptional
-                      ? 'Sin proveedor — a elección'
-                      : page === 'sales'
-                        ? 'Sin vincular — escritura manual'
-                        : 'Sin vincular — escritura manual'}
-                  </option>
+                  <option value="">Sin vincular — escritura manual</option>
                   {options.map((item) => (
                     <option key={item.rowId ?? item.id} value={item.rowId ?? ''}>
-                      {item.name} · {item.id}
+                      {item.name}{page === 'purchases' && item.ruc ? ` · RUC ${item.ruc}` : ''} · {item.id}
                     </option>
                   ))}
                 </select>
@@ -295,16 +275,12 @@ export default function RecordModal({ page, record, saving = false, onClose, onS
               ) : linkedTarget ? (
                 <small className="relation-hint linked">
                   <GoogleIcon name="link" className="small" />
-                  {page === 'inventory'
-                    ? `Vinculado a ${linkedTarget.name} (${linkedTarget.id}) como proveedor habitual. El nombre del producto no cambia.`
-                    : `Vinculado a ${linkedTarget.name} (${linkedTarget.id}). El nombre se completa solo; puedes cambiarlo si lo necesitas.`}
+                  Vinculado a {linkedTarget.name} ({linkedTarget.id}). El nombre se completa solo; puedes cambiarlo si lo necesitas.
                 </small>
               ) : (
                 <small className="relation-hint">
                   <GoogleIcon name="link_off" className="small" />
-                  {isInventoryOptional
-                    ? 'A elección del usuario: puedes dejar el producto sin proveedor o elegir uno de la lista.'
-                    : 'Opcional: elige de la lista para vincular, o deja sin vincular y escribe el nombre.'}
+                  Opcional: elige de la lista para vincular, o deja sin vincular y escribe el nombre.
                 </small>
               )}
             </div>
@@ -352,68 +328,22 @@ export default function RecordModal({ page, record, saving = false, onClose, onS
             <div className="lines-section">
               <div className="lines-head">
                 <span className="lines-title">
-                  <GoogleIcon name={page === 'sales' ? 'shopping_cart' : 'factory'} className="small" />
-                  {page === 'sales' ? 'Productos de la venta' : 'Productos del proveedor'}
+                  <GoogleIcon name={page === 'purchases' ? 'factory' : 'shopping_cart'} className="small" />
+                  {page === 'sales' ? 'Productos de la venta' : page === 'quotes' ? 'Productos cotizados' : 'Productos del proveedor'}
                 </span>
                 <span className="lines-total">{money(linesTotal)}</span>
               </div>
-              {page === 'sales' && (
-                <div className="relation-field">
-                  <label htmlFor="supplier_filter">Proveedor (filtro de productos)</label>
-                  <span className="relation-control">
-                    <GoogleIcon name="factory" />
-                    <select
-                      id="supplier_filter"
-                      name="supplier_filter"
-                      value={supplierFilter}
-                      onChange={(event) => setSupplierFilter(event.target.value)}
-                    >
-                      <option value="">Elige un proveedor para ver sus productos</option>
-                      <option value="all">Todos los proveedores</option>
-                      {suppliers.map((item) => (
-                        <option key={item.rowId ?? item.id} value={item.rowId ?? ''}>
-                          {item.name} · {item.id}
-                        </option>
-                      ))}
-                    </select>
-                  </span>
-                  {!suppliers.length ? (
-                    <small className="relation-hint">
-                      <GoogleIcon name="person_add" className="small" />
-                      Aún no hay proveedores registrados. Créalo primero en su módulo o elige Todos para ver el inventario completo.
-                    </small>
-                  ) : !supplierFilter ? (
-                    <small className="relation-hint">
-                      <GoogleIcon name="filter_alt" className="small" />
-                      Al seleccionar recién aparecerán aquí los productos relacionados a ese proveedor.
-                    </small>
-                  ) : supplierFilter === 'all' ? (
-                    <small className="relation-hint">
-                      <GoogleIcon name="inventory_2" className="small" />
-                      Viendo todo el inventario. Elige un proveedor para filtrar solo sus productos.
-                    </small>
-                  ) : saleFilterHasRelated ? (
-                    <small className="relation-hint linked">
-                      <GoogleIcon name="link" className="small" />
-                      Mostrando productos de {saleFilterName ?? 'este proveedor'}. Marca 1 o más: el precio es fijo del producto (se define en Inventario).
-                    </small>
-                  ) : (
-                    <small className="relation-hint">
-                      <GoogleIcon name="link_off" className="small" />
-                      Este proveedor aún no tiene productos relacionados. Elige Todos o asigna el proveedor desde Inventario.
-                    </small>
-                  )}
-                </div>
-              )}
               <small className="relation-hint">
                 <GoogleIcon name="info" className="small" />
                 {page === 'sales'
-                  ? 'La cantidad nunca supera el stock y el sin stock no se puede marcar. El total calcula el monto y descuenta stock.'
-                  : relatedId
-                    ? supplierHasRelated && !showAllProducts
-                      ? 'Solo se listan los productos relacionados a este proveedor, con su precio fijo. Marca 1 o más: suma al total y aumenta stock.'
-                      : 'Este proveedor aún no tiene productos relacionados: se muestran todos con su precio fijo. Márcalos para la compra.'
-                    : 'Elige primero un proveedor para filtrar sus productos, o marca directamente de todo el inventario.'}
+                  ? 'Vendes de MI inventario: la cantidad nunca supera el stock y el sin stock no se puede marcar. El total calcula el monto y descuenta stock.'
+                  : page === 'quotes'
+                    ? 'Cotizas de MI inventario con precio fijo. No mueve stock hasta convertir en venta.'
+                    : relatedId
+                      ? supplierHasRelated && !showAllProducts
+                        ? 'Solo el catálogo de este proveedor, con su costo fijo. Al completar, lo comprado ingresa a tu inventario.'
+                        : 'Este proveedor aún no tiene catálogo: se muestra todo. Márcalos para la compra.'
+                      : 'Elige un proveedor para ver su catálogo, o marca directamente de todo.'}
               </small>
               {page === 'purchases' && relatedId && (
                 <label className="lines-toggle">
@@ -424,12 +354,10 @@ export default function RecordModal({ page, record, saving = false, onClose, onS
               {linesLoading ? (
                 <p className="relation-hint"><GoogleIcon name="progress_activity" className="small login-spin" /> Cargando líneas guardadas…</p>
               ) : !visibleProducts.length ? (
-                page === 'sales' && !supplierFilter ? (
-                  <p className="relation-hint"><GoogleIcon name="filter_alt" className="small" /> Elige un proveedor arriba y aquí aparecerán sus productos relacionados para seleccionar.</p>
-                ) : page === 'sales' && supplierFilter !== 'all' && !saleFilterHasRelated ? (
-                  <p className="relation-hint"><GoogleIcon name="link_off" className="small" /> Sin productos relacionados a este proveedor. Cambia el filtro o asigna productos a este proveedor desde Inventario.</p>
+                page === 'purchases' && relatedId && !supplierHasRelated ? (
+                  <p className="relation-hint"><GoogleIcon name="link_off" className="small" /> Este proveedor aún no tiene catálogo. Cárgalo desde Proveedores y vuelve aquí.</p>
                 ) : (
-                  <p className="relation-hint"><GoogleIcon name="inventory_2" className="small" /> Aún no hay productos en inventario.</p>
+                  <p className="relation-hint"><GoogleIcon name="inventory_2" className="small" /> {page === 'purchases' ? 'Aún no hay catálogo cargado.' : 'Aún no hay productos en inventario.'}</p>
                 )
               ) : (
                 <div className="lines-list">
@@ -438,13 +366,15 @@ export default function RecordModal({ page, record, saving = false, onClose, onS
                     if (!uuid) return null
                     const draft = lines[uuid]
                     const checked = Boolean(draft?.selected)
+                    const isCatalogLine = page === 'purchases'
                     const stock = product.quantity ?? 0
-                    const suggested = product.precio
-                    const noPrice = suggested === undefined || suggested === 0
+                    const suggested = lineUnitPrice(product)
+                    const hasNoPrice = !suggested
                     const noStock = page === 'sales' && stock <= 0
                     const qty = draft?.qty ?? 1
                     const unit = draft?.price ?? 0
                     const overStock = page === 'sales' && checked && qty > stock
+                    const isNewArrival = isCatalogLine && !product.productoId
                     return (
                       <div key={uuid} className={`line-row${checked ? ' checked' : ''}${overStock ? ' over' : ''}`}>
                         <label className="line-check">
@@ -459,12 +389,12 @@ export default function RecordModal({ page, record, saving = false, onClose, onS
                           <span className="line-copy">
                             <strong>{product.name}</strong>
                             <small>
-                              {product.id} · {stock} und.
-                              {suggested !== undefined ? ` · P. fijo ${money(suggested)}` : ' · Sin precio'}
-                              {product.relatedName ? ` · ${product.relatedName}` : ''}
+                              {product.id} · {isCatalogLine ? `Costo fijo ${money(suggested)}` : `${stock} und. · P. fijo ${money(suggested)}`}
+                              {!isCatalogLine && product.relatedName ? ` · ${product.relatedName}` : ''}
+                              {isCatalogLine && (product.productoId ? ` · En inventario: ${stock} und.` : ' · Nuevo: ingresa al completar')}
                             </small>
                             {noStock && <small className="line-warn"><GoogleIcon name="block" className="small" /> Sin stock: no se puede vender.</small>}
-                            {checked && noPrice && <small className="line-warn"><GoogleIcon name="sell" className="small" /> Sin precio definido: no se puede guardar. Defínelo en Inventario.</small>}
+                            {checked && hasNoPrice && <small className="line-warn"><GoogleIcon name="sell" className="small" /> Sin {isCatalogLine ? 'costo' : 'precio'} definido: no se puede guardar. Defínelo {isCatalogLine ? 'en el catálogo del proveedor' : 'en Inventario'}.</small>}
                             {overStock && <small className="line-warn"><GoogleIcon name="warning" className="small" /> Máximo {stock} und. disponibles.</small>}
                           </span>
                         </label>
@@ -493,7 +423,9 @@ export default function RecordModal({ page, record, saving = false, onClose, onS
                             value={draft?.price ?? suggested ?? 0}
                             disabled={!checked}
                             readOnly
-                            title="Precio fijo del producto: se define en Inventario y no se edita aquí"
+                            title={page === 'purchases'
+                              ? 'Costo fijo del catálogo: se define en Proveedores y no se edita aquí'
+                              : 'Precio fijo del producto: se define en Inventario y no se edita aquí'}
                           />
                         </label>
                         <span className="line-subtotal" title={checked ? `${money(unit)} × ${qty} = ${money(qty * unit)}` : 'Marca el producto para sumar'}>
@@ -520,7 +452,9 @@ export default function RecordModal({ page, record, saving = false, onClose, onS
                 {selectedLines.length
                   ? page === 'sales'
                     ? 'La cantidad nunca supera el stock. Al guardar descuenta stock y genera cuenta por cobrar si no está completada.'
-                    : 'La compra se sigue por estados: el stock entra al inventario solo al marcar Completada. Genera cuenta por pagar si no está completada.'
+                    : page === 'quotes'
+                      ? 'La cotización no mueve stock. Al convertirla en venta descuenta stock y genera la cobranza.'
+                      : 'La compra se sigue por estados: el stock entra al inventario solo al marcar Completada. Genera cuenta por pagar si no está completada.'
                   : 'Sin productos marcados: se guardará solo la cabecera con el monto manual (si lo indicas abajo).'}
               </p>
               {!selectedLines.length && (
@@ -529,6 +463,15 @@ export default function RecordModal({ page, record, saving = false, onClose, onS
             </div>
           ) : (
             <>
+              {page === 'suppliers' && (
+                <>
+                  <label>RUC de la empresa (11 dígitos)<input name="ruc" inputMode="numeric" maxLength={11} required defaultValue={record?.ruc ?? ''} placeholder="20123456789" /></label>
+                  <small className="relation-hint">
+                    <GoogleIcon name="badge" className="small" />
+                    Identifica la empresa en cada orden de compra para verificarla antes de aprobar fases.
+                  </small>
+                </>
+              )}
               {meta.kind === 'money' && <label>{meta.amountLabel}<input name="amount" min="0" step="0.01" type="number" defaultValue={record?.amount} placeholder="0.00" /></label>}
               {meta.kind === 'stock' && (
                 <>
@@ -539,7 +482,7 @@ export default function RecordModal({ page, record, saving = false, onClose, onS
                       <small className="relation-hint">
                         <GoogleIcon name="payments" className="small" />
                         {record?.precio !== undefined
-                          ? `Precio actual: ${money(record.precio)}. Se usará fijo en ventas y compras (no editable por línea).`
+                          ? `Precio actual: ${money(record.precio)}. Se usará fijo en ventas y cotizaciones (no editable por línea).`
                           : 'Define el precio aquí. Si lo dejas vacío se guarda en 0 y lo defines después editando el producto.'}
                       </small>
                     </>
@@ -550,19 +493,19 @@ export default function RecordModal({ page, record, saving = false, onClose, onS
           )}
           <label>Estado
             <select name="status" value={statusValue} onChange={(event) => setStatusValue(event.target.value as RecordStatus)}>
-              {statusesForPage(page).map((status) => <option key={status}>{status}</option>)}
+              {statusOptions.map((status) => <option key={status}>{status}</option>)}
             </select>
           </label>
           {page === 'purchases' && (() => {
             const stepIndex = Math.max(0, PURCHASE_FLOW.findIndex((step) => step.status === statusValue))
-            const wasCompleted = record?.status === 'Completada'
-            const becomesCompleted = statusValue === 'Completada'
+            const hadStock = record ? purchaseHasStock(record.status) : false
+            const hasStock = purchaseHasStock(statusValue)
             const pendingUnits = selectedLines.reduce((sum, line) => sum + line.qty, 0)
             const unitsLabel = `${pendingUnits} und.`
             return (
               <div className="tracking-section">
                 <span className="lines-title"><GoogleIcon name="package_2" className="small" /> Seguimiento de la compra</span>
-                <div className="tracking-steps">
+                <div className="tracking-steps five">
                   {PURCHASE_FLOW.map((step, index) => (
                     <button
                       key={step.status}
@@ -586,25 +529,25 @@ export default function RecordModal({ page, record, saving = false, onClose, onS
                   </button>
                 ) : (
                   <small className="relation-hint linked">
-                    <GoogleIcon name="check_circle" className="small" /> Compra completada: lo comprado ya está en el inventario.
+                    <GoogleIcon name="check_circle" className="small" /> Compra pagada: lo comprado está en el inventario y sin deuda.
                   </small>
                 )}
                 {selectedLines.length > 0 ? (
-                  !wasCompleted && !becomesCompleted ? (
+                  !hadStock && !hasStock ? (
                     <small className="relation-hint">
-                      <GoogleIcon name="hourglass_top" className="small" /> {unitsLabel} pendientes de ingreso: entrarán al inventario al marcar Completada. Mientras tanto la compra se sigue por estados.
+                      <GoogleIcon name="hourglass_top" className="small" /> {unitsLabel} pendientes de ingreso: entrarán al inventario al llegar a Recepción.
                     </small>
-                  ) : !wasCompleted && becomesCompleted ? (
+                  ) : !hadStock && hasStock ? (
                     <small className="relation-hint linked">
-                      <GoogleIcon name="add_box" className="small" /> Al guardar ingresan {unitsLabel} al inventario.
+                      <GoogleIcon name="add_box" className="small" /> Al guardar ingresan {unitsLabel} al inventario (+ kardex).
                     </small>
-                  ) : wasCompleted && !becomesCompleted ? (
+                  ) : hadStock && !hasStock ? (
                     <small className="relation-hint">
                       <GoogleIcon name="warning" className="small" /> Al guardar se retiran {unitsLabel} del inventario (revierte el ingreso). Solo es posible si hay stock suficiente.
                     </small>
                   ) : (
                     <small className="relation-hint">
-                      <GoogleIcon name="sync" className="small" /> Compra completada: al guardar se ajusta la diferencia de unidades en el inventario.
+                      <GoogleIcon name="sync" className="small" /> Mercadería en almacén: al guardar se ajusta la diferencia de unidades en el inventario.
                     </small>
                   )
                 ) : (

@@ -15,26 +15,48 @@ export function percentage(value: number, total: number) {
   return total > 0 ? Math.min(100, Math.max(0, Math.round(value / total * 100))) : 0
 }
 
+function classifyFinance(item: RecordItem): 'receivable' | 'payable' | null {
+  if (item.id.startsWith('CXC')) return 'receivable'
+  if (item.id.startsWith('CXP')) return 'payable'
+  const detail = item.detail.toLocaleLowerCase('es')
+  const isReceivable = detail.includes('por cobrar')
+  const isPayable = detail.includes('por pagar')
+  if (isReceivable && !isPayable) return 'receivable'
+  if (isPayable && !isReceivable) return 'payable'
+  return null
+}
+
 export function financialSnapshot(finance: RecordItem[]) {
   const open = finance.filter((item) => item.status !== 'Completada')
+  const closed = finance.filter((item) => item.status === 'Completada')
   const receivables: RecordItem[] = []
   const payables: RecordItem[] = []
   const unclassified: RecordItem[] = []
 
   for (const item of open) {
-    const detail = item.detail.toLocaleLowerCase('es')
-    const isReceivable = detail.includes('por cobrar')
-    const isPayable = detail.includes('por pagar')
-    if (item.id.startsWith('CXC')) receivables.push(item)
-    else if (item.id.startsWith('CXP')) payables.push(item)
-    else if (isReceivable && !isPayable) receivables.push(item)
-    else if (isPayable && !isReceivable) payables.push(item)
+    const kind = classifyFinance(item)
+    if (kind === 'receivable') receivables.push(item)
+    else if (kind === 'payable') payables.push(item)
     else unclassified.push(item)
+  }
+
+  // Caja: lo cobrado (CxC completadas) menos lo pagado (CxP completadas).
+  const completedReceivables: RecordItem[] = []
+  const completedPayables: RecordItem[] = []
+  for (const item of closed) {
+    const kind = classifyFinance(item)
+    if (kind === 'receivable') completedReceivables.push(item)
+    else if (kind === 'payable') completedPayables.push(item)
   }
 
   const receivable = totalAmount(receivables)
   const payable = totalAmount(payables)
-  return { open, receivables, payables, unclassified, receivable, payable, balance: receivable - payable }
+  const cajaIngresos = totalAmount(completedReceivables)
+  const cajaEgresos = totalAmount(completedPayables)
+  return {
+    open, receivables, payables, unclassified, receivable, payable, balance: receivable - payable,
+    completedReceivables, completedPayables, cajaIngresos, cajaEgresos, cajaSaldo: cajaIngresos - cajaEgresos,
+  }
 }
 
 export function buildSalesSeries(sales: RecordItem[], filter: SalesFilter, mode: ChartMode) {

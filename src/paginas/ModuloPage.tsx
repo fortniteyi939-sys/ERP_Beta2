@@ -1,26 +1,32 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Navigate, useParams, useSearchParams } from 'react-router-dom'
+import { Navigate, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   Activity,
   AlertTriangle,
   ChevronDown,
+  ChevronUp,
   CircleCheck,
   Download,
+  Eye,
   FileSpreadsheet,
   FileText,
   Filter,
   Pencil,
   Plus,
   Search,
+  ShoppingCart,
   SlidersHorizontal,
   Table,
   Trash2,
 } from 'lucide-react'
 import { DATA_PAGES, pageMeta } from '../data/catalog'
+import { financialSnapshot } from '../data/dashboard'
 import { formatWhen, money, statusTone } from '../data/helpers'
 import { useRecords } from '../context/RecordsContext'
-import { fetchKardex, friendlyError, type KardexEntry } from '../services/records'
-import type { DataPage, ExportFormat } from '../types'
+import { deleteCatalogItem, fetchKardex, friendlyError, insertCatalogItem, updateCatalogItem, type KardexEntry } from '../services/records'
+import ConfirmModal from '../components/ConfirmModal'
+import PurchaseOrderDetail from '../components/PurchaseOrderDetail'
+import type { DataPage, ExportFormat, RecordItem } from '../types'
 
 function kardexTone(tipo: KardexEntry['tipo']) {
   if (tipo === 'entrada') return 'green'
@@ -36,10 +42,123 @@ export default function ModuloPage() {
 }
 
 function ModuloView({ page }: { page: DataPage }) {
-  const { records, loading, openComposer, openEditor, requestDelete, exportTable } = useRecords()
+  const { records, catalog, loading, openComposer, openEditor, requestDelete, exportTable, convertQuote, reload, notify } = useRecords()
+  const navigate = useNavigate()
+  const [converting, setConverting] = useState<RecordItem | null>(null)
+  // Compras: orden seleccionada para ver su panel por fases.
+  const [selectedPurchase, setSelectedPurchase] = useState<string | null>(null)
+  const purchaseOrder = page === 'purchases' ? records.purchases.find((item) => item.id === selectedPurchase) ?? null : null
+  // Proveedores: su catálogo (lo que ofrecen), independiente de mi inventario.
+  const [expandedSupplier, setExpandedSupplier] = useState<string | null>(null)
+  const [catBusy, setCatBusy] = useState(false)
+  const [catName, setCatName] = useState('')
+  const [catDetail, setCatDetail] = useState('')
+  const [catCosto, setCatCosto] = useState('')
+  const [editingCatalogId, setEditingCatalogId] = useState<string | null>(null)
+  const [editCatName, setEditCatName] = useState('')
+  const [editCatCosto, setEditCatCosto] = useState('')
+  const [deletingCatalog, setDeletingCatalog] = useState<RecordItem | null>(null)
+
+  const supplierCatalog = (supplierRowId?: string) =>
+    !supplierRowId ? [] : catalog.filter((item) => item.proveedor_id === supplierRowId)
+
+  const resetCatForm = () => {
+    setCatName('')
+    setCatDetail('')
+    setCatCosto('')
+    setEditingCatalogId(null)
+  }
+
+  const submitCatalogItem = async (supplierRowId: string | undefined, supplierName: string) => {
+    if (!supplierRowId || catBusy) return
+    const costo = Number(catCosto)
+    if (catName.trim().length < 2) {
+      notify('El producto del proveedor necesita un nombre.')
+      return
+    }
+    if (!Number.isFinite(costo) || costo < 0) {
+      notify('El costo debe ser cero o mayor.')
+      return
+    }
+    setCatBusy(true)
+    try {
+      await insertCatalogItem(supplierRowId, { nombre: catName, detalle: catDetail, costo: Math.round(costo * 100) / 100 })
+      await reload()
+      resetCatForm()
+      notify(`"${catName.trim()}" agregado al catálogo de ${supplierName}.`)
+    } catch (error) {
+      notify(friendlyError(error))
+    } finally {
+      setCatBusy(false)
+    }
+  }
+
+  const saveCatalogEdit = async () => {
+    if (!editingCatalogId || catBusy) return
+    const costo = Number(editCatCosto)
+    if (editCatName.trim().length < 2) {
+      notify('El producto del proveedor necesita un nombre.')
+      return
+    }
+    if (!Number.isFinite(costo) || costo < 0) {
+      notify('El costo debe ser cero o mayor.')
+      return
+    }
+    setCatBusy(true)
+    try {
+      const current = catalog.find((item) => item.rowId === editingCatalogId)
+      await updateCatalogItem(editingCatalogId, { nombre: editCatName, detalle: current?.detail ?? '', costo: Math.round(costo * 100) / 100 })
+      await reload()
+      resetCatForm()
+      notify('Catálogo actualizado.')
+    } catch (error) {
+      notify(friendlyError(error))
+    } finally {
+      setCatBusy(false)
+    }
+  }
+
+  const confirmCatalogDelete = async () => {
+    if (!deletingCatalog?.rowId || catBusy) return
+    const name = deletingCatalog.name
+    setCatBusy(true)
+    try {
+      await deleteCatalogItem(deletingCatalog.rowId)
+      await reload()
+      setDeletingCatalog(null)
+      notify(`"${name}" eliminado del catálogo.`)
+    } catch (error) {
+      notify(friendlyError(error))
+    } finally {
+      setCatBusy(false)
+    }
+  }
+
+  const confirmConvert = async () => {
+    if (!converting) return
+    const code = converting.id
+    setConverting(null)
+    await convertQuote(code)
+  }
   const pageRecords = records[page]
   const meta = pageMeta[page]
   const Icon = meta.icon
+  // Finanzas: pestañas por cobrar / por pagar / caja.
+  const [finTab, setFinTab] = useState<'todos' | 'cobrar' | 'pagar' | 'caja'>('todos')
+  const financeSnap = useMemo(() => page === 'finance' ? financialSnapshot(records.finance) : null, [page, records.finance])
+  const financeIds = useMemo(() => {
+    if (!financeSnap) return null
+    return {
+      cobrar: new Set(financeSnap.receivables.map((item) => item.id)),
+      pagar: new Set(financeSnap.payables.map((item) => item.id)),
+      caja: new Set([...financeSnap.completedReceivables, ...financeSnap.completedPayables].map((item) => item.id)),
+    }
+  }, [financeSnap])
+  const baseRecords = useMemo(() => {
+    if (page !== 'finance' || !financeSnap || !financeIds || finTab === 'todos') return pageRecords
+    const ids = financeIds[finTab]
+    return pageRecords.filter((item) => ids.has(item.id))
+  }, [page, pageRecords, financeSnap, financeIds, finTab])
   const [searchParams, setSearchParams] = useSearchParams()
   const query = searchParams.get('q') ?? ''
   const statusFilter = searchParams.get('status') ?? 'Todos'
@@ -117,17 +236,17 @@ function ModuloView({ page }: { page: DataPage }) {
   const kardexEntradas = kardexFiltrado.filter((row) => row.tipo === 'entrada').reduce((sum, row) => sum + row.cantidad, 0)
   const kardexSalidas = kardexFiltrado.filter((row) => row.tipo === 'salida').reduce((sum, row) => sum + row.cantidad, 0)
 
-  const statuses = Array.from(new Set(pageRecords.map((item) => item.status)))
-  const filteredRecords = useMemo(() => pageRecords.filter((item) => {
-    const matchesQuery = `${item.id} ${item.name} ${item.detail}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())
+  const statuses = Array.from(new Set(baseRecords.map((item) => item.status)))
+  const filteredRecords = useMemo(() => baseRecords.filter((item) => {
+    const matchesQuery = `${item.id} ${item.name} ${item.detail} ${item.ruc ?? ''}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())
     return matchesQuery && (statusFilter === 'Todos' || item.status === statusFilter)
-  }), [pageRecords, query, statusFilter])
-  const total = pageRecords.reduce((sum, item) => sum + (item.amount ?? 0), 0)
-  const critical = pageRecords.filter((item) => item.status === 'Crítico' || item.status === 'Bajo stock').length
+  }), [baseRecords, query, statusFilter])
+  const total = baseRecords.reduce((sum, item) => sum + (item.amount ?? 0), 0)
+  const critical = baseRecords.filter((item) => item.status === 'Crítico' || item.status === 'Bajo stock').length
   const primaryValue = meta.kind === 'stock'
-    ? `${pageRecords.reduce((sum, item) => sum + (item.quantity ?? 0), 0)} und.`
+    ? `${baseRecords.reduce((sum, item) => sum + (item.quantity ?? 0), 0)} und.`
     : meta.kind === 'file' || meta.kind === 'settings'
-      ? `${pageRecords.filter((item) => item.status === 'Vigente' || item.status === 'Activo').length} vigentes`
+      ? `${baseRecords.filter((item) => item.status === 'Vigente' || item.status === 'Activo').length} vigentes`
       : money(total)
   const valueHeading = meta.kind === 'stock' ? 'EXISTENCIA REGISTRADA' : meta.kind === 'file' ? 'ARCHIVOS DISPONIBLES' : meta.kind === 'settings' ? 'PARÁMETROS ACTIVOS' : 'VALOR ACUMULADO'
 
@@ -140,7 +259,7 @@ function ModuloView({ page }: { page: DataPage }) {
 
       <section className="module-summary-grid">
         <article><span className="summary-icon"><Icon size={18} /></span><div><small>{valueHeading}</small><strong>{primaryValue}</strong></div></article>
-        <article><span className="summary-icon muted"><Activity size={18} /></span><div><small>REGISTROS ACTIVOS</small><strong>{pageRecords.filter((item) => item.status !== 'Pendiente').length} / {pageRecords.length}</strong></div></article>
+        <article><span className="summary-icon muted"><Activity size={18} /></span><div><small>REGISTROS ACTIVOS</small><strong>{baseRecords.filter((item) => item.status !== 'Pendiente').length} / {baseRecords.length}</strong></div></article>
         <article><span className={critical ? 'summary-icon warning' : 'summary-icon success'}>{critical ? <AlertTriangle size={18} /> : <CircleCheck size={18} />}</span><div><small>{critical ? 'REQUIERE REVISIÓN' : 'ESTADO DEL MÓDULO'}</small><strong>{critical ? `${critical} alertas` : 'Operativo'}</strong></div></article>
       </section>
 
@@ -154,7 +273,21 @@ function ModuloView({ page }: { page: DataPage }) {
         </div>
       )}
 
-      {isInventory && view === 'kardex' ? (
+      {page === 'finance' && financeSnap && (
+        <div className="inventory-tabs">
+          <div className="segmented-control" role="tablist" aria-label="Cuentas de finanzas">
+            <button type="button" role="tab" aria-selected={finTab === 'todos'} className={finTab === 'todos' ? 'selected' : ''} onClick={() => setFinTab('todos')}>Todos ({records.finance.length})</button>
+            <button type="button" role="tab" aria-selected={finTab === 'cobrar'} className={finTab === 'cobrar' ? 'selected' : ''} onClick={() => setFinTab('cobrar')}>Por cobrar ({financeSnap.receivables.length})</button>
+            <button type="button" role="tab" aria-selected={finTab === 'pagar'} className={finTab === 'pagar' ? 'selected' : ''} onClick={() => setFinTab('pagar')}>Por pagar ({financeSnap.payables.length})</button>
+            <button type="button" role="tab" aria-selected={finTab === 'caja'} className={finTab === 'caja' ? 'selected' : ''} onClick={() => setFinTab('caja')}>Caja</button>
+          </div>
+          {finTab === 'caja' && <span className="kardex-count">Saldo {money(financeSnap.cajaSaldo)}</span>}
+        </div>
+      )}
+
+      {page === 'purchases' && purchaseOrder ? (
+        <PurchaseOrderDetail order={purchaseOrder} onBack={() => setSelectedPurchase(null)} />
+      ) : isInventory && view === 'kardex' ? (
       <section className="table-panel panel">
         <div className="table-header">
           <div><span className="panel-label">KARDEX DE INVENTARIO</span><h2>Historial de movimientos</h2></div>
@@ -206,6 +339,14 @@ function ModuloView({ page }: { page: DataPage }) {
             <button className="round-action" type="button" aria-label="Restablecer filtros" title="Restablecer filtros" onClick={resetFilters}><SlidersHorizontal size={17} /></button>
           </div>
         </div>
+        {page === 'finance' && finTab === 'caja' && financeSnap && (
+          <div className="kardex-summary">
+            <span className="kardex-chip in"><span className="gicon small">add_box</span> Ingresos: {money(financeSnap.cajaIngresos)}</span>
+            <span className="kardex-chip out"><span className="gicon small">remove_circle</span> Egresos: {money(financeSnap.cajaEgresos)}</span>
+            <span className="kardex-chip total"><span className="gicon small">payments</span> Saldo: {money(financeSnap.cajaSaldo)}</span>
+            <span className="kardex-note">Caja = cobrado (CxC completadas) − pagado (CxP completadas).</span>
+          </div>
+        )}
         <div className="table-toolbar">
           <label className="table-search"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`Buscar en ${meta.title.toLocaleLowerCase()}...`} /></label>
           <label className="filter-select"><Filter size={16} /><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option>Todos</option>{statuses.map((status) => <option key={status}>{status}</option>)}</select><ChevronDown size={14} /></label>
@@ -218,22 +359,117 @@ function ModuloView({ page }: { page: DataPage }) {
                 const linkedLabel = item.relatedName
                   ? `${item.relatedName}${item.relatedCode ? ` · ${item.relatedCode}` : ''}`
                   : null
-                const showRelation = page === 'sales' || page === 'purchases' || page === 'inventory'
+                const showRelation = page === 'sales' || page === 'purchases' || page === 'quotes'
+                const supplierKey = item.rowId ?? item.id
+                const supplierOpen = page === 'suppliers' && expandedSupplier === supplierKey
+                const offered = page === 'suppliers' ? supplierCatalog(item.rowId) : []
                 return (
+                <>
                 <tr key={item.id}>
                   <td><span className="record-id">{item.id}</span></td>
                   <td><strong>{item.name}</strong><small>{item.detail}</small>
                     {showRelation && (linkedLabel ? (
                       <span className="linked-badge"><span className="gicon">link</span>{linkedLabel}</span>
                     ) : (
-                      <span className="linked-badge muted"><span className="gicon">link_off</span>{page === 'inventory' ? 'Sin proveedor' : 'Sin vincular'}</span>
+                      <span className="linked-badge muted"><span className="gicon">link_off</span>Sin vincular</span>
+                    ))}
+                    {page === 'suppliers' && (item.ruc ? (
+                      <span className="linked-badge"><span className="gicon">badge</span>RUC {item.ruc}</span>
+                    ) : (
+                      <span className="linked-badge muted"><span className="gicon">badge</span>Sin RUC</span>
                     ))}
                   </td>
                   <td className="record-date">{item.date}</td>
                   <td className="record-value">{page === 'inventory' ? `${item.quantity ?? 0} und.${item.precio !== undefined ? ` · ${money(item.precio)}` : ''}` : page === 'documents' || page === 'reports' || page === 'settings' ? item.detail.split('·')[0].trim() : item.amount ? money(item.amount) : '—'}</td>
                   <td><span className={`status-pill ${statusTone(item.status)}`}>{item.status}</span></td>
-                  <td><div className="row-actions"><button className="row-action edit" type="button" aria-label={`Editar ${item.name}`} title="Editar" onClick={() => openEditor(page, item)}><Pencil size={15} /></button><button className="row-action delete" type="button" aria-label={`Eliminar ${item.name}`} title="Eliminar" onClick={() => requestDelete(page, item)}><Trash2 size={15} /></button></div></td>
+                  <td><div className="row-actions">{page === 'purchases' && <button className="row-action" type="button" aria-label={`Ver seguimiento de ${item.id}`} title="Ver seguimiento por fases" onClick={() => setSelectedPurchase(item.id)}><Eye size={15} /></button>}{page === 'quotes' && (item.status === 'Pendiente' || item.status === 'En curso' || item.status === 'Aprobada') && <button className="row-action convert" type="button" aria-label={`Convertir ${item.id} en venta`} title="Convertir en venta" onClick={() => setConverting(item)}><ShoppingCart size={15} /></button>}{page === 'suppliers' && <button className="row-action" type="button" aria-label={supplierOpen ? `Ocultar catálogo de ${item.name}` : `Ver catálogo que ofrece ${item.name}`} title={`Catálogo que ofrece (${offered.length})`} aria-expanded={supplierOpen} onClick={() => { setExpandedSupplier(supplierOpen ? null : supplierKey); resetCatForm() }}>{supplierOpen ? <ChevronUp size={15} /> : <ChevronDown size={15} />}</button>}<button className="row-action edit" type="button" aria-label={`Editar ${item.name}`} title="Editar" onClick={() => openEditor(page, item)}><Pencil size={15} /></button><button className="row-action delete" type="button" aria-label={`Eliminar ${item.name}`} title="Eliminar" onClick={() => requestDelete(page, item)}><Trash2 size={15} /></button></div></td>
                 </tr>
+                {supplierOpen && (
+                <tr key={`${item.id}-ofrece`}>
+                  <td colSpan={6}>
+                    <div className="supplier-detail">
+                      <span className="lines-title"><span className="gicon small">storefront</span> Catálogo de {item.name} ({offered.length})</span>
+                      <small className="relation-hint"><span className="gicon small">info</span> Lo que ofrece, independiente de tu inventario. Al completar una compra, lo comprado ingresa a tu stock.</small>
+                      {offered.length ? (
+                        <div className="supplier-product-list">
+                          {offered.map((product) => (
+                            editingCatalogId === product.rowId ? (
+                              <div key={product.id} className="supplier-product-row editing">
+                                <input
+                                  aria-label="Nombre del producto"
+                                  value={editCatName}
+                                  onChange={(event) => setEditCatName(event.target.value)}
+                                  placeholder="Nombre del producto"
+                                />
+                                <input
+                                  aria-label="Costo"
+                                  type="number"
+                                  min={0}
+                                  step={0.01}
+                                  value={editCatCosto}
+                                  onChange={(event) => setEditCatCosto(event.target.value)}
+                                  placeholder="0.00"
+                                />
+                                <span className="supplier-product-actions">
+                                  <button className="export-button" type="button" disabled={catBusy} onClick={saveCatalogEdit}>Guardar</button>
+                                  <button className="export-button" type="button" disabled={catBusy} onClick={resetCatForm}>Cancelar</button>
+                                </span>
+                              </div>
+                            ) : (
+                              <div key={product.id} className="supplier-product-row">
+                                <span className="supplier-product-copy"><strong>{product.name}</strong><small>{product.id} · Costo {money(product.amount ?? 0)}{product.productoId ? ` · En inventario: ${product.quantity ?? 0} und.` : ' · Nuevo: ingresa al completar'}</small></span>
+                                <span className="supplier-product-actions">
+                                  {product.productoId && product.relatedName && <button className="export-button" type="button" onClick={() => navigate(`/inventory?q=${encodeURIComponent(product.relatedName ?? product.name)}`)}>Ver stock</button>}
+                                  <button
+                                    className="export-button"
+                                    type="button"
+                                    disabled={catBusy}
+                                    onClick={() => {
+                                      setEditingCatalogId(product.rowId ?? null)
+                                      setEditCatName(product.name)
+                                      setEditCatCosto(String(product.amount ?? 0))
+                                    }}
+                                  >
+                                    Editar
+                                  </button>
+                                  <button className="export-button danger" type="button" disabled={catBusy} onClick={() => setDeletingCatalog(product)}>Eliminar</button>
+                                </span>
+                              </div>
+                            )
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="relation-hint"><span className="gicon small">inventory_2</span> Catálogo vacío. Agrega abajo lo que ofrece este proveedor.</p>
+                      )}
+                      <div className="supplier-link-bar">
+                        <input
+                          aria-label="Nombre del producto"
+                          value={catName}
+                          onChange={(event) => setCatName(event.target.value)}
+                          placeholder="Nombre del producto que ofrece"
+                        />
+                        <input
+                          aria-label="Detalle"
+                          value={catDetail}
+                          onChange={(event) => setCatDetail(event.target.value)}
+                          placeholder="Detalle (opcional)"
+                        />
+                        <input
+                          aria-label="Costo"
+                          type="number"
+                          min={0}
+                          step={0.01}
+                          value={catCosto}
+                          onChange={(event) => setCatCosto(event.target.value)}
+                          placeholder="Costo S/"
+                        />
+                        <button className="primary-button" type="button" disabled={catBusy} onClick={() => submitCatalogItem(item.rowId, item.name)}>Agregar</button>
+                      </div>
+                    </div>
+                  </td>
+                </tr>
+                )}
+                </>
                 )
               })}
               {!filteredRecords.length && <tr><td colSpan={6}><div className="empty-table"><Search size={20} />{loading ? <><strong>Cargando registros…</strong><span>Consultando la base de datos.</span></> : pageRecords.length ? <><strong>Sin coincidencias</strong><span>Ajusta la búsqueda o el estado para consultar otros registros.</span></> : <><strong>Aún no hay registros</strong><span>Crea el primero con el botón «{meta.action}».</span></>}</div></td></tr>}
@@ -241,6 +477,24 @@ function ModuloView({ page }: { page: DataPage }) {
           </table>
         </div>
       </section>
+      )}
+      {converting && (
+        <ConfirmModal
+          title="Convertir en venta"
+          message={`Se creará una venta con los productos de "${converting.name}" (${converting.id}), se descontará stock y la cotización pasará a Completada.`}
+          confirmLabel="Convertir"
+          onCancel={() => setConverting(null)}
+          onConfirm={confirmConvert}
+        />
+      )}
+      {deletingCatalog && (
+        <ConfirmModal
+          title="Eliminar del catálogo"
+          message={`¿Quitar "${deletingCatalog.name}" del catálogo? No borra tu inventario, solo la oferta del proveedor.`}
+          confirmLabel="Eliminar"
+          onCancel={() => setDeletingCatalog(null)}
+          onConfirm={confirmCatalogDelete}
+        />
       )}
     </>
   )

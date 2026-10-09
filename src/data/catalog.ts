@@ -1,6 +1,7 @@
 import {
   Box,
   Building2,
+  ClipboardList,
   FileText,
   LayoutDashboard,
   Settings,
@@ -14,6 +15,7 @@ import type { DataPage, PageKey, PageMeta, RecordItem } from '../types'
 
 export const DATA_PAGES: DataPage[] = [
   'sales',
+  'quotes',
   'purchases',
   'inventory',
   'customers',
@@ -47,6 +49,18 @@ export const pageMeta: Record<PageKey, PageMeta> = {
     kind: 'money',
     prefix: 'V',
     title: 'Ventas',
+  },
+  quotes: {
+    action: 'Nueva cotización',
+    amountLabel: 'Monto cotizado (S/)',
+    description: 'Cotiza productos con precio fijo, haz seguimiento y conviértela en venta al aprobar.',
+    detailLabel: 'Validez u observaciones',
+    eyebrow: 'COMERCIAL / COTIZACIONES',
+    entityLabel: 'Cliente o razón social',
+    icon: ClipboardList,
+    kind: 'money',
+    prefix: 'COT',
+    title: 'Cotizaciones',
   },
   purchases: {
     action: 'Nueva compra',
@@ -144,7 +158,7 @@ export const pageMeta: Record<PageKey, PageMeta> = {
 
 export const navigation: { label: string; pages: PageKey[] }[] = [
   { label: 'CONTROL', pages: ['dashboard'] },
-  { label: 'OPERACIÓN', pages: ['sales', 'purchases', 'inventory'] },
+  { label: 'OPERACIÓN', pages: ['sales', 'quotes', 'purchases', 'inventory'] },
   { label: 'RELACIONES', pages: ['customers', 'suppliers'] },
   { label: 'GOBIERNO', pages: ['finance', 'documents', 'reports', 'settings'] },
 ]
@@ -156,10 +170,14 @@ export const initialData: Record<DataPage, RecordItem[]> = {
     { id: 'V-2046', name: 'Grupo Cumbre S.R.L.', detail: 'Factura F001-00480 · Cusco', date: 'Hoy, 09:18', amount: 6240, status: 'Completada' },
     { id: 'V-2045', name: 'Inversiones Sol S.A.C.', detail: 'Cotización COT-0098 · Lima', date: 'Ayer, 16:42', amount: 3175, status: 'En curso' },
   ],
+  quotes: [
+    { id: 'COT-0007', name: 'Distribuidora Norte S.A.C.', detail: 'Válida 15 días · Lima · 3 productos', date: 'Hace 2 h', amount: 2480, status: 'Pendiente' },
+    { id: 'COT-0006', name: 'Grupo Cumbre S.R.L.', detail: 'Válida 30 días · Cusco · 2 productos', date: 'Ayer, 15:20', amount: 5960, status: 'Aprobada' },
+  ],
   purchases: [
-    { id: 'OC-302', name: 'Tecno Import S.A.C.', detail: 'Orden de compra · 12 productos', date: 'Hoy, 10:20', amount: 8420, status: 'Pendiente' },
-    { id: 'OC-301', name: 'Suministros Globales', detail: 'Recepción completa · Almacén central', date: 'Ayer, 14:05', amount: 3250, status: 'Completada' },
-    { id: 'OC-300', name: 'Data Systems Perú', detail: 'Orden confirmada · 4 productos', date: '17 Feb, 2026', amount: 1980, status: 'En tránsito' },
+    { id: 'OC-302', name: 'Tecno Import S.A.C.', detail: 'Solicitud · 12 productos', date: 'Hoy, 10:20', amount: 8420, status: 'Solicitud' },
+    { id: 'OC-301', name: 'Suministros Globales', detail: 'Factura F002-0091 · Almacén central', date: 'Ayer, 14:05', amount: 3250, status: 'Factura' },
+    { id: 'OC-300', name: 'Data Systems Perú', detail: 'Recepción · Guía T001-0452', date: '17 Feb, 2026', amount: 1980, status: 'Recepción' },
   ],
   inventory: [
     { id: 'PRD-001', name: 'Mouse inalámbrico M500', detail: 'Tecnología · Almacén central', date: 'Actualizado hace 8 min', quantity: 6, status: 'Crítico' },

@@ -1,12 +1,14 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { pageMeta } from '../data/catalog'
 import { defaultStatus, escapeCell, isStockAlert } from '../data/helpers'
-import { deleteRecord, emptyRecords, fetchAllRecords, fetchDocumentLines, friendlyError, insertPurchaseWithLines, insertRecord, insertSaleWithLines, updatePurchaseWithLines, updateRecord, updateSaleWithLines, updateStatuses, type LineInput } from '../services/records'
+import { convertQuoteToSale, deleteRecord, emptyRecords, enrichCatalog, fetchAllRecords, fetchDocumentLines, fetchSupplierCatalogRaw, friendlyError, insertPurchaseWithLines, insertQuoteWithLines, insertRecord, insertSaleWithLines, isMissingTableError, updatePurchaseWithLines, updateQuoteWithLines, updateRecord, updateSaleWithLines, updateStatuses, type LineInput } from '../services/records'
 import { useAuth } from './AuthContext'
 import type { DataPage, ExportFormat, PendingDelete, RecordItem, RecordModalState, RecordStatus } from '../types'
 
 type RecordsContextValue = {
   records: Record<DataPage, RecordItem[]>
+  /** Catálogo de productos por proveedor (independiente de mi inventario). */
+  catalog: RecordItem[]
   loading: boolean
   saving: boolean
   reload: () => Promise<void>
@@ -17,6 +19,7 @@ type RecordsContextValue = {
   openEditor: (page: DataPage, record: RecordItem) => void
   closeRecordModal: () => void
   saveRecord: (page: DataPage, record: RecordItem | null, event: FormEvent<HTMLFormElement>) => Promise<void>
+  convertQuote: (code: string) => Promise<void>
   pendingDelete: PendingDelete | null
   requestDelete: (page: DataPage, record: RecordItem) => void
   cancelDelete: () => void
@@ -31,6 +34,7 @@ export function RecordsProvider({ children }: { children: ReactNode }) {
   const { session } = useAuth()
   const userId = session?.user.id
   const [records, setRecords] = useState<Record<DataPage, RecordItem[]>>(emptyRecords)
+  const [catalog, setCatalog] = useState<RecordItem[]>([])
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [recordModal, setRecordModal] = useState<RecordModalState | null>(null)
@@ -46,34 +50,57 @@ export function RecordsProvider({ children }: { children: ReactNode }) {
     toastTimer.current = window.setTimeout(() => setToast(''), 3200)
   }
 
-  // Carga todos los módulos desde Supabase cada vez que entra una persona.
+  // Carga todos los módulos + catálogo de proveedores cada vez que entra una persona.
+  const loadAll = useCallback(async () => {
+    const base = await fetchAllRecords()
+    // El catálogo puede faltar si su migración aún no se ejecutó: no rompe lo demás.
+    const raw = await fetchSupplierCatalogRaw().catch((error) => {
+      if (isMissingTableError(error)) {
+        notify('Falta la tabla del catálogo de proveedores. Ejecuta en Supabase la migración 20261013000000_catalogo_proveedores.sql y recarga.')
+      } else {
+        notify(friendlyError(error))
+      }
+      return null
+    })
+    return { base, catalog: raw ? enrichCatalog(raw, base.inventory) : [] as RecordItem[] }
+  }, [])
+
   const reload = useCallback(async () => {
     if (!userId) return
     try {
-      setRecords(await fetchAllRecords())
+      const { base, catalog: next } = await loadAll()
+      setRecords(base)
+      setCatalog(next)
     } catch (error) {
       notify(friendlyError(error))
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId])
+  }, [userId, loadAll])
 
   useEffect(() => {
     if (!userId) {
       setRecords(emptyRecords())
+      setCatalog([])
       setLoading(false)
       return
     }
     let active = true
+    setRecords(emptyRecords())
+    setCatalog([])
     setLoading(true)
-    fetchAllRecords()
-      .then((data) => active && setRecords(data))
+    loadAll()
+      .then(({ base, catalog: next }) => {
+        if (!active) return
+        setRecords(base)
+        setCatalog(next)
+      })
       .catch((error) => active && notify(friendlyError(error)))
       .finally(() => active && setLoading(false))
     return () => {
       active = false
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId])
+  }, [userId, loadAll])
 
   // Si otra persona cambió datos mientras la pestaña estaba en segundo plano, se actualiza al volver.
   useEffect(() => {
@@ -102,7 +129,7 @@ export function RecordsProvider({ children }: { children: ReactNode }) {
     // '' = sin vínculo (opcional). UUID = vínculo a cliente/proveedor registrado.
     // undefined = el módulo no tiene relación (no se envía la columna).
     const relatedId: string | null | undefined =
-      page === 'sales' || page === 'purchases' || page === 'inventory'
+      page === 'sales' || page === 'purchases' || page === 'quotes'
         ? (rawRelated ? rawRelated : null)
         : undefined
     let name = String(form.get('name') ?? '').trim()
@@ -116,33 +143,48 @@ export function RecordsProvider({ children }: { children: ReactNode }) {
     const savedPrecio = page === 'inventory' && precioInput !== '' && Number.isFinite(precioNumber) && precioNumber >= 0
       ? Math.round(precioNumber * 100) / 100
       : record?.precio
+    // RUC del proveedor: 11 dígitos obligatorios (identifica la empresa en cada orden).
+    const rucDigits = String(form.get('ruc') ?? '').replace(/\D/g, '')
+    if (page === 'suppliers' && !/^\d{11}$/.test(rucDigits)) {
+      notify('El RUC del proveedor debe tener 11 dígitos.')
+      return
+    }
     // Si se eligió un cliente/proveedor registrado, el nombre se hereda de ese
     // registro para que cliente_nombre/proveedor_nombre y la FK queden coherentes.
-    // En productos NO se hereda: el nombre es propio del producto, solo se vincula.
     // El trigger vincular_cliente/vincular_proveedor queda como respaldo.
-    if (relatedId && page !== 'inventory') {
-      if (page === 'sales') {
+    if (relatedId) {
+      if (page === 'sales' || page === 'quotes') {
         const target = records.customers.find((item) => item.rowId === relatedId)
         if (target) name = target.name
-      } else {
+      } else if (page === 'purchases') {
         const target = records.suppliers.find((item) => item.rowId === relatedId)
         if (target) name = target.name
       }
     }
-    // Líneas de productos (solo ventas/compras): inputs qty_<uuid> + price_<uuid>
-    // marcados con sel_<uuid>. Si no hay ninguna marcada, se guarda cabecera simple.
+    // Líneas: ventas/cotizaciones eligen de MI inventario; compras del CATÁLOGO
+    // del proveedor (independiente). Inputs qty_<uuid> + price_<uuid> con sel_<uuid>.
     const lines: LineInput[] = []
-    if (page === 'sales' || page === 'purchases') {
-      for (const product of records.inventory) {
+    const parseLines = (source: RecordItem[], priceHint: string) => {
+      for (const product of source) {
         const uuid = product.rowId
         if (!uuid) continue
         if (!form.get(`sel_${uuid}`)) continue
         const qty = Math.floor(Number(String(form.get(`qty_${uuid}`) ?? '')))
         const price = Number(String(form.get(`price_${uuid}`) ?? ''))
         if (!Number.isFinite(qty) || qty <= 0) throw new Error(`Cantidad inválida para ${product.name}.`)
-        if (!Number.isFinite(price) || price <= 0) throw new Error(`"${product.name}" no tiene precio definido. Defínelo en Inventario antes de guardar.`)
+        if (!Number.isFinite(price) || price <= 0) throw new Error(`"${product.name}" no tiene precio definido. ${priceHint}`)
         lines.push({ producto_id: uuid, cantidad: qty, precio: price })
       }
+    }
+    try {
+      if (page === 'sales' || page === 'quotes') {
+        parseLines(records.inventory, 'Defínelo en Inventario antes de guardar.')
+      } else if (page === 'purchases') {
+        parseLines(catalog, 'Defínelo en el catálogo del proveedor antes de guardar.')
+      }
+    } catch (error) {
+      notify(friendlyError(error))
+      return
     }
     const input = {
       name,
@@ -151,8 +193,9 @@ export function RecordsProvider({ children }: { children: ReactNode }) {
       ...(meta.kind === 'money' && savedAmount !== undefined ? { amount: savedAmount } : {}),
       ...(meta.kind === 'stock' && savedQuantity !== undefined ? { quantity: savedQuantity } : {}),
       ...(page === 'inventory' && savedPrecio !== undefined ? { precio: savedPrecio } : {}),
-      ...(page === 'sales' && relatedId !== undefined ? { cliente_id: relatedId } : {}),
-      ...((page === 'purchases' || page === 'inventory') && relatedId !== undefined ? { proveedor_id: relatedId } : {}),
+      ...(page === 'suppliers' ? { ruc: rucDigits } : {}),
+      ...((page === 'sales' || page === 'quotes') && relatedId !== undefined ? { cliente_id: relatedId } : {}),
+      ...(page === 'purchases' && relatedId !== undefined ? { proveedor_id: relatedId } : {}),
     }
     // Si hay líneas, el total manda sobre el monto manual.
     if (lines.length) {
@@ -177,6 +220,18 @@ export function RecordsProvider({ children }: { children: ReactNode }) {
             ? await updateSaleWithLines(record.id, input, lines)
             : await insertSaleWithLines(input, lines)
         }
+      } else if (page === 'quotes' && (lines.length || record)) {
+        if (!lines.length && record?.rowId) {
+          const previous = await fetchDocumentLines('quotes', record.rowId)
+          const previousInput: LineInput[] = previous.map((line) => ({ producto_id: line.producto_id, cantidad: line.cantidad, precio: line.precio }))
+          saved = record
+            ? await updateQuoteWithLines(record.id, input, previousInput)
+            : await insertQuoteWithLines(input, [])
+        } else {
+          saved = record
+            ? await updateQuoteWithLines(record.id, input, lines)
+            : await insertQuoteWithLines(input, lines)
+        }
       } else if (page === 'purchases' && (lines.length || record)) {
         if (!lines.length && record?.rowId) {
           const previous = await fetchDocumentLines('purchases', record.rowId)
@@ -192,8 +247,8 @@ export function RecordsProvider({ children }: { children: ReactNode }) {
       } else {
         saved = record ? await updateRecord(page, record.id, input) : await insertRecord(page, input)
       }
-      // Ventas/compras mueven inventario y generan CxC/CxP: recarga todo para verlo.
-      if (page === 'sales' || page === 'purchases' || page === 'inventory') {
+      // Ventas/compras/cotizaciones mueven inventario o generan CxC/CxP: recarga todo para verlo.
+      if (page === 'sales' || page === 'purchases' || page === 'inventory' || page === 'quotes') {
         try {
           setRecords(await fetchAllRecords())
         } catch {
@@ -215,12 +270,11 @@ export function RecordsProvider({ children }: { children: ReactNode }) {
       let migrationNote = ''
       if (page === 'inventory') {
         const wantedPrecio = (input as { precio?: number }).precio !== undefined
-        const wantedSupplier = (input as { proveedor_id?: string | null }).proveedor_id
         if (wantedPrecio && saved.precio === undefined) {
           migrationNote = ' Sin precio: falta ejecutar la migración 20261011000000_producto_precio.sql en Supabase.'
-        } else if (wantedSupplier && !saved.proveedor_id) {
-          migrationNote = ' Sin proveedor vinculado: falta ejecutar la migración 20261010000000_producto_proveedor.sql en Supabase.'
         }
+      } else if (page === 'suppliers' && saved.ruc === undefined) {
+        migrationNote = ' Sin RUC: falta ejecutar la migración 20261015000000_proveedor_ruc.sql en Supabase.'
       }
       notify(record ? `${meta.title}: registro actualizado${linesNote}.${migrationNote}` : `${meta.title}: registro guardado en la base de datos${linesNote}.${migrationNote}`)
     } catch (error) {
@@ -244,6 +298,24 @@ export function RecordsProvider({ children }: { children: ReactNode }) {
       notify(friendlyError(error))
     } finally {
       setPendingDelete(null)
+    }
+  }
+
+  const convertQuote = async (code: string) => {
+    if (saving) return
+    setSaving(true)
+    try {
+      const { sale } = await convertQuoteToSale(code)
+      try {
+        setRecords(await fetchAllRecords())
+      } catch {
+        // Si la recarga falla, la próxima visita o foco la reintenta.
+      }
+      notify(`Cotización ${code} convertida en venta ${sale.id}. Stock y cobranza actualizados.`)
+    } catch (error) {
+      notify(friendlyError(error))
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -316,6 +388,7 @@ export function RecordsProvider({ children }: { children: ReactNode }) {
 
   const value: RecordsContextValue = {
     records,
+    catalog,
     loading,
     saving,
     reload,
@@ -326,6 +399,7 @@ export function RecordsProvider({ children }: { children: ReactNode }) {
     openEditor,
     closeRecordModal,
     saveRecord,
+    convertQuote,
     pendingDelete,
     requestDelete,
     cancelDelete,

@@ -96,7 +96,7 @@ export default function DashboardOverview() {
   const salesTotal = totalAmount(sales)
   const completedSales = sales.filter((item) => item.status === 'Completada')
   const openSales = sales.filter((item) => item.status !== 'Completada')
-  const openPurchases = purchases.filter((item) => item.status !== 'Completada')
+  const openPurchases = purchases.filter((item) => item.status !== 'Pagada')
   const stockAlerts = inventory.filter(isStockAlert)
   const criticalStock = stockAlerts.filter((item) => item.status === 'Crítico')
   const units = inventory.reduce((sum, item) => sum + (item.quantity ?? 0), 0)

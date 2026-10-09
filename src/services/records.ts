@@ -1,6 +1,6 @@
 import { requireSupabase } from '../lib/supabase'
 import { DATA_PAGES } from '../data/catalog'
-import { formatWhen } from '../data/helpers'
+import { formatWhen, purchaseHasStock, totalWithIgv } from '../data/helpers'
 import type { DataPage, DocumentLine, RecordItem, RecordStatus } from '../types'
 
 type Row = Record<string, unknown>
@@ -17,6 +17,14 @@ export type RecordInput = {
   /** UUID del cliente (ventas) o proveedor (compras/productos). null = sin vínculo. */
   cliente_id?: string | null
   proveedor_id?: string | null
+  /** Proveedores: RUC de 11 dígitos. null = sin registrar. */
+  ruc?: string | null
+  /** Compras: fecha límite o aproximada (YYYY-MM-DD). null = sin fecha. */
+  fecha_limite?: string | null
+  /** Compras: comprobante de recepción (Factura, Boleta, Guía de Remisión, Nota de Venta). */
+  comprobante_tipo?: string | null
+  /** Compras: número del comprobante de recepción. */
+  comprobante_numero?: string | null
 }
 
 // Cómo cada módulo de la interfaz se corresponde con una tabla de Supabase.
@@ -26,6 +34,7 @@ type PageConfig = {
   amount?: string   // columna monetaria (si el módulo tiene valor)
   quantity?: string // columna de existencias (inventario)
   price?: string    // columna de precio (productos)
+  taxId?: string    // columna de RUC (proveedores)
   /** Columna FK opcional hacia clientes/proveedores. */
   relationColumn?: 'cliente_id' | 'proveedor_id'
   /** Módulo origen para resolver el nombre del vinculado. */
@@ -34,10 +43,11 @@ type PageConfig = {
 
 export const pageConfig: Record<DataPage, PageConfig> = {
   sales: { table: 'ventas', name: 'cliente_nombre', amount: 'monto', relationColumn: 'cliente_id', relationTarget: 'customers' },
+  quotes: { table: 'cotizaciones', name: 'cliente_nombre', amount: 'monto', relationColumn: 'cliente_id', relationTarget: 'customers' },
   purchases: { table: 'compras', name: 'proveedor_nombre', amount: 'monto', relationColumn: 'proveedor_id', relationTarget: 'suppliers' },
-  inventory: { table: 'productos', name: 'nombre', quantity: 'stock', price: 'precio', relationColumn: 'proveedor_id', relationTarget: 'suppliers' },
+  inventory: { table: 'productos', name: 'nombre', quantity: 'stock', price: 'precio' },
   customers: { table: 'clientes', name: 'razon_social', amount: 'linea_credito' },
-  suppliers: { table: 'proveedores', name: 'razon_social', amount: 'linea_credito' },
+  suppliers: { table: 'proveedores', name: 'razon_social', amount: 'linea_credito', taxId: 'ruc' },
   finance: { table: 'pagos', name: 'contraparte', amount: 'monto' },
   documents: { table: 'documentos', name: 'nombre_archivo' },
   reports: { table: 'reportes', name: 'nombre' },
@@ -70,8 +80,18 @@ function toRecord(page: DataPage, row: Row): RecordItem {
   }
   if (config.amount && row[config.amount] !== null && row[config.amount] !== undefined) item.amount = Number(row[config.amount])
   if (config.quantity && row[config.quantity] !== null && row[config.quantity] !== undefined) item.quantity = Number(row[config.quantity])
+  if (page === 'purchases') {
+    if (typeof row.fecha_limite === 'string') item.fechaLimite = row.fecha_limite
+    else if (row.fecha_limite === null) item.fechaLimite = null
+    if (typeof row.comprobante_tipo === 'string') item.comprobanteTipo = row.comprobante_tipo
+    else if (row.comprobante_tipo === null) item.comprobanteTipo = null
+    if (typeof row.comprobante_numero === 'string') item.comprobanteNumero = row.comprobante_numero
+    else if (row.comprobante_numero === null) item.comprobanteNumero = null
+  }
   // Precio del producto (si la migración de precio ya se ejecutó).
   if (config.price && row[config.price] !== null && row[config.price] !== undefined) item.precio = Number(row[config.price])
+  // RUC del proveedor (si su migración ya se ejecutó).
+  if (config.taxId && config.taxId in row) item.ruc = (row[config.taxId] as string | null) ?? null
   // FKs en crudo (pueden venir null o no existir si la migración aún no se ejecutó).
   if (typeof row.cliente_id === 'string' || row.cliente_id === null) item.cliente_id = row.cliente_id as string | null
   else if ('cliente_id' in row) item.cliente_id = (row.cliente_id as string | null) ?? null
@@ -97,10 +117,24 @@ function toRow(page: DataPage, input: RecordInput): Row {
   if (config.amount && input.amount !== undefined) row[config.amount] = input.amount
   if (config.quantity && input.quantity !== undefined) row[config.quantity] = input.quantity
   if (config.price && input.precio !== undefined) row[config.price] = input.precio
+  if (config.taxId && input.ruc !== undefined) row[config.taxId] = input.ruc
   // Solo se envía la FK si el formulario la definió (incluye null para desvincular).
   if (config.relationColumn === 'cliente_id' && input.cliente_id !== undefined) row.cliente_id = input.cliente_id
   if (config.relationColumn === 'proveedor_id' && input.proveedor_id !== undefined) row.proveedor_id = input.proveedor_id
+  // Seguimiento de la orden de compra (solo ese módulo los usa).
+  if (page === 'purchases') {
+    if (input.fecha_limite !== undefined) row.fecha_limite = input.fecha_limite || null
+    if (input.comprobante_tipo !== undefined) row.comprobante_tipo = input.comprobante_tipo || null
+    if (input.comprobante_numero !== undefined) row.comprobante_numero = input.comprobante_numero?.trim() || null
+  }
   return row
+}
+
+/** Si la BD aún no tiene una tabla nueva (migración pendiente). */
+export function isMissingTableError(error: unknown): boolean {
+  const err = error as { code?: string; message?: string; details?: string; hint?: string } | null
+  if (err?.code !== '42P01' && err?.code !== 'PGRST205') return false
+  return true
 }
 
 /** Si la BD aún no tiene una columna nueva (migración pendiente), la quita y reintenta. Así el push no rompe. */
@@ -118,44 +152,33 @@ function withoutColumn(row: Row, column: string): Row {
   return next
 }
 
+/** Columnas nuevas que pueden faltar si su migración aún no se ejecutó. */
+const PENDING_COLUMNS = ['ruc', 'precio', 'proveedor_id']
+
 async function insertWithColumnFallback(table: string, payload: Row) {
   const client = requireSupabase()
-  const first = await client.from(table).insert(payload).select('*').single()
-  if (!first.error) return first
-  let retryPayload = payload
-  if (isMissingColumnError(first.error, 'precio') && 'precio' in retryPayload) {
-    retryPayload = withoutColumn(retryPayload, 'precio')
-    const second = await client.from(table).insert(retryPayload).select('*').single()
-    if (!second.error) return second
-    if (isMissingColumnError(second.error, 'proveedor_id') && 'proveedor_id' in retryPayload) {
-      return await client.from(table).insert(withoutColumn(retryPayload, 'proveedor_id')).select('*').single()
-    }
-    return second
+  let current = payload
+  for (let attempt = 0; attempt <= PENDING_COLUMNS.length; attempt++) {
+    const result = await client.from(table).insert(current).select('*').single()
+    if (!result.error) return result
+    const missing = PENDING_COLUMNS.find((column) => column in current && isMissingColumnError(result.error, column))
+    if (!missing) return result
+    current = withoutColumn(current, missing)
   }
-  if (isMissingColumnError(first.error, 'proveedor_id') && 'proveedor_id' in retryPayload) {
-    return await client.from(table).insert(withoutColumn(retryPayload, 'proveedor_id')).select('*').single()
-  }
-  return first
+  return client.from(table).insert(current).select('*').single()
 }
 
 async function updateWithColumnFallback(table: string, payload: Row, code: string) {
   const client = requireSupabase()
-  const first = await client.from(table).update(payload).eq('codigo', code).select('*').single()
-  if (!first.error) return first
-  let retryPayload = payload
-  if (isMissingColumnError(first.error, 'precio') && 'precio' in retryPayload) {
-    retryPayload = withoutColumn(retryPayload, 'precio')
-    const second = await client.from(table).update(retryPayload).eq('codigo', code).select('*').single()
-    if (!second.error) return second
-    if (isMissingColumnError(second.error, 'proveedor_id') && 'proveedor_id' in retryPayload) {
-      return await client.from(table).update(withoutColumn(retryPayload, 'proveedor_id')).eq('codigo', code).select('*').single()
-    }
-    return second
+  let current = payload
+  for (let attempt = 0; attempt <= PENDING_COLUMNS.length; attempt++) {
+    const result = await client.from(table).update(current).eq('codigo', code).select('*').single()
+    if (!result.error) return result
+    const missing = PENDING_COLUMNS.find((column) => column in current && isMissingColumnError(result.error, column))
+    if (!missing) return result
+    current = withoutColumn(current, missing)
   }
-  if (isMissingColumnError(first.error, 'proveedor_id') && 'proveedor_id' in retryPayload) {
-    return await client.from(table).update(withoutColumn(retryPayload, 'proveedor_id')).eq('codigo', code).select('*').single()
-  }
-  return first
+  return client.from(table).update(current).eq('codigo', code).select('*').single()
 }
 
 // Traduce los errores de Postgres/PostgREST a mensajes comprensibles.
@@ -165,13 +188,118 @@ export function friendlyError(error: unknown): string {
   if (err?.code === '42501' || err?.code === 'PGRST116') return 'Tu rol no tiene permiso para realizar esta acción.'
   if (err?.code === '23505') return 'Ya existe un registro con esos datos.'
   if (err?.code === '23514') return 'Alguno de los valores no es válido (revisa montos y estado).'
-  if (err?.code === '42703' || err?.code === 'PGRST204' || (/proveedor_id|precio/i.test(haystack) && /column|schema cache/i.test(haystack))) {
+  if (err?.code === '42703' || err?.code === 'PGRST204' || (/proveedor_id|precio|\bruc\b/i.test(haystack) && /column|schema cache/i.test(haystack))) {
     if (/precio/i.test(haystack)) return 'Falta la columna precio en productos. Ejecuta en Supabase la migración 20261011000000_producto_precio.sql y recarga.'
-    return 'Falta la columna proveedor_id en productos. Ejecuta en Supabase la migración 20261010000000_producto_proveedor.sql y recarga.'
+    if (/\bruc\b/i.test(haystack)) return 'Falta la columna RUC en proveedores. Ejecuta en Supabase la migración 20261015000000_proveedor_ruc.sql y recarga.'
+    return 'Falta una columna nueva en Supabase. Ejecuta las migraciones pendientes y recarga.'
   }
   if (err?.code === '23503') return 'El cliente o proveedor seleccionado ya no existe. Elige otro de la lista.'
+  if ((err?.code === '42P01' || err?.code === 'PGRST205') && /proveedor_productos|cotizacion/i.test(haystack)) {
+    return 'Falta una tabla nueva en Supabase. Ejecuta las migraciones pendientes (20261012000000_cotizaciones.sql, 20261013000000_catalogo_proveedores.sql) y recarga.'
+  }
   if (err?.message && /fetch|network/i.test(err.message)) return 'No se pudo conectar con la base de datos. Revisa tu conexión.'
   return err?.message || 'Ocurrió un error inesperado con la base de datos.'
+}
+
+// -----------------------------------------------------------------------------
+// Catálogo de proveedores: lo que ofrece cada proveedor, independiente de mi
+// inventario. La compra lo trae y al completarse ingresa a inventario.
+// -----------------------------------------------------------------------------
+
+export type CatalogInput = { nombre: string; detalle: string; costo: number }
+
+/** Lee el catálogo completo (sin enriquecer stock: lo hace enrichCatalog). */
+export async function fetchSupplierCatalogRaw(): Promise<RecordItem[]> {
+  const client = requireSupabase()
+  const { data, error } = await client
+    .from('proveedor_productos')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .order('codigo', { ascending: false })
+  if (error) throw error
+  return (data as Row[]).map((row) => {
+    const item: RecordItem = {
+      id: String(row.codigo),
+      rowId: typeof row.id === 'string' ? row.id : undefined,
+      name: String(row.nombre ?? ''),
+      detail: String(row.detalle ?? ''),
+      date: formatWhen(String(row.updated_at ?? row.created_at ?? '')),
+      status: 'Activo',
+      proveedor_id: (row.proveedor_id as string | null) ?? null,
+      productoId: (row.producto_id as string | null) ?? null,
+    }
+    if (row.costo !== null && row.costo !== undefined) item.amount = Number(row.costo)
+    return item
+  })
+}
+
+/** Cruza el catálogo con MI inventario: stock actual y nombre del equivalente. */
+export function enrichCatalog(catalog: RecordItem[], inventory: RecordItem[]): RecordItem[] {
+  const stockById = new Map<string, RecordItem>()
+  for (const product of inventory) {
+    if (product.rowId) stockById.set(product.rowId, product)
+  }
+  return catalog.map((item) => {
+    if (!item.productoId) return item
+    const target = stockById.get(item.productoId)
+    if (!target) return item
+    return { ...item, quantity: target.quantity ?? 0, relatedName: target.name, relatedCode: target.id }
+  })
+}
+
+export async function insertCatalogItem(proveedor_id: string, input: CatalogInput): Promise<RecordItem> {
+  const name = input.nombre.trim()
+  if (name.length < 2) throw new Error('El producto del proveedor necesita un nombre.')
+  if (!Number.isFinite(input.costo) || input.costo < 0) throw new Error('El costo debe ser cero o mayor.')
+  const { data, error } = await requireSupabase()
+    .from('proveedor_productos')
+    .insert({ proveedor_id, nombre: name, detalle: input.detalle.trim(), costo: input.costo })
+    .select('*')
+    .single()
+  if (error) throw error
+  const row = data as Row
+  return {
+    id: String(row.codigo),
+    rowId: typeof row.id === 'string' ? row.id : undefined,
+    name: String(row.nombre ?? ''),
+    detail: String(row.detalle ?? ''),
+    date: formatWhen(String(row.updated_at ?? row.created_at ?? '')),
+    status: 'Activo',
+    proveedor_id: (row.proveedor_id as string | null) ?? null,
+    productoId: (row.producto_id as string | null) ?? null,
+    amount: Number(row.costo ?? 0),
+  }
+}
+
+export async function updateCatalogItem(id: string, input: CatalogInput): Promise<RecordItem> {
+  const name = input.nombre.trim()
+  if (name.length < 2) throw new Error('El producto del proveedor necesita un nombre.')
+  if (!Number.isFinite(input.costo) || input.costo < 0) throw new Error('El costo debe ser cero o mayor.')
+  const { data, error } = await requireSupabase()
+    .from('proveedor_productos')
+    .update({ nombre: name, detalle: input.detalle.trim(), costo: input.costo })
+    .eq('id', id)
+    .select('*')
+    .single()
+  if (error) throw error
+  const row = data as Row
+  return {
+    id: String(row.codigo),
+    rowId: typeof row.id === 'string' ? row.id : undefined,
+    name: String(row.nombre ?? ''),
+    detail: String(row.detalle ?? ''),
+    date: formatWhen(String(row.updated_at ?? row.created_at ?? '')),
+    status: 'Activo',
+    proveedor_id: (row.proveedor_id as string | null) ?? null,
+    productoId: (row.producto_id as string | null) ?? null,
+    amount: Number(row.costo ?? 0),
+  }
+}
+
+export async function deleteCatalogItem(id: string): Promise<void> {
+  const { data, error } = await requireSupabase().from('proveedor_productos').delete().eq('id', id).select('id')
+  if (error) throw error
+  if (!data || data.length === 0) throw { code: '42501', message: 'No se pudo eliminar del catálogo.' }
 }
 
 /** Enriquece ventas/compras/productos con el nombre del cliente/proveedor vinculado. */
@@ -197,8 +325,8 @@ function enrichRelations(records: Record<DataPage, RecordItem[]>): Record<DataPa
   return {
     ...records,
     sales: withRelation(records.sales, customersById),
+    quotes: withRelation(records.quotes, customersById),
     purchases: withRelation(records.purchases, suppliersById),
-    inventory: withRelation(records.inventory, suppliersById),
   }
 }
 
@@ -221,8 +349,8 @@ export async function fetchAllRecords(): Promise<Record<DataPage, RecordItem[]>>
 
 export async function insertRecord(page: DataPage, input: RecordInput): Promise<RecordItem> {
   const payload = toRow(page, input)
-  // Solo inventario tiene columnas nuevas (proveedor_id, precio): ahí se aplica el fallback.
-  const attempt = page === 'inventory'
+  // Inventario (precio) y proveedores (ruc) tienen columnas nuevas: ahí se aplica el fallback.
+  const attempt = page === 'inventory' || page === 'suppliers'
     ? await insertWithColumnFallback(pageConfig[page].table, payload)
     : await requireSupabase().from(pageConfig[page].table).insert(payload).select('*').single()
   if (attempt.error) throw attempt.error
@@ -231,7 +359,7 @@ export async function insertRecord(page: DataPage, input: RecordInput): Promise<
 
 export async function updateRecord(page: DataPage, code: string, input: RecordInput): Promise<RecordItem> {
   const payload = toRow(page, input)
-  const attempt = page === 'inventory'
+  const attempt = page === 'inventory' || page === 'suppliers'
     ? await updateWithColumnFallback(pageConfig[page].table, payload, code)
     : await requireSupabase().from(pageConfig[page].table).update(payload).eq('codigo', code).select('*').single()
   if (attempt.error) throw attempt.error
@@ -319,9 +447,26 @@ function assertValidLines(lines: LineInput[]) {
   }
 }
 
-/** Líneas guardadas de una venta o compra (para precargar el editor). */
-export async function fetchDocumentLines(page: 'sales' | 'purchases', docRowId: string): Promise<DocumentLine[]> {
+/** Líneas guardadas de una venta, cotización o compra (para precargar el editor). */
+export async function fetchDocumentLines(page: 'sales' | 'purchases' | 'quotes', docRowId: string): Promise<DocumentLine[]> {
   const client = requireSupabase()
+  if (page === 'quotes') {
+    const { data, error } = await client
+      .from('detalle_cotizaciones')
+      .select('producto_id, cantidad, precio_unitario, productos(codigo, nombre, stock)')
+      .eq('cotizacion_id', docRowId)
+    if (error) throw error
+    return (data as unknown as Array<{ producto_id: string | null; cantidad: number; precio_unitario: number; productos: { codigo: string; nombre: string; stock: number } | null }>)
+      .filter((row) => row.producto_id)
+      .map((row) => ({
+        producto_id: row.producto_id as string,
+        cantidad: Number(row.cantidad),
+        precio: Number(row.precio_unitario),
+        codigo: row.productos?.codigo,
+        nombre: row.productos?.nombre,
+        stock: row.productos?.stock,
+      }))
+  }
   if (page === 'sales') {
     const { data, error } = await client
       .from('detalle_ventas')
@@ -341,18 +486,17 @@ export async function fetchDocumentLines(page: 'sales' | 'purchases', docRowId: 
   }
   const { data, error } = await client
     .from('detalle_compras')
-    .select('producto_id, cantidad, costo_unitario, productos(codigo, nombre, stock)')
+    .select('proveedor_producto_id, cantidad, costo_unitario, proveedor_productos(codigo, nombre)')
     .eq('compra_id', docRowId)
   if (error) throw error
-  return (data as unknown as Array<{ producto_id: string | null; cantidad: number; costo_unitario: number; productos: { codigo: string; nombre: string; stock: number } | null }>)
-    .filter((row) => row.producto_id)
+  return (data as unknown as Array<{ proveedor_producto_id: string | null; cantidad: number; costo_unitario: number; proveedor_productos: { codigo: string; nombre: string } | null }>)
+    .filter((row) => row.proveedor_producto_id)
     .map((row) => ({
-      producto_id: row.producto_id as string,
+      producto_id: row.proveedor_producto_id as string,
       cantidad: Number(row.cantidad),
       precio: Number(row.costo_unitario),
-      codigo: row.productos?.codigo,
-      nombre: row.productos?.nombre,
-      stock: row.productos?.stock,
+      codigo: row.proveedor_productos?.codigo,
+      nombre: row.proveedor_productos?.nombre,
     }))
 }
 
@@ -389,7 +533,7 @@ async function setStock(producto_id: string, nuevo: number): Promise<void> {
 
 /** Crea la cuenta por cobrar (venta) o por pagar (compra). El trigger asigna CXC-/CXP-. */
 async function createRelatedPago(kind: 'sale' | 'purchase', header: Row, total: number, estado: RecordStatus): Promise<void> {
-  if (estado === 'Completada') return // al contado: no genera cobranza pendiente.
+  if (estado === 'Completada' || estado === 'Pagada') return // al contado: no genera cobranza pendiente.
   const client = requireSupabase()
   const codigo = String(header.codigo)
   const isSale = kind === 'sale'
@@ -420,7 +564,7 @@ async function syncRelatedPago(kind: 'sale' | 'purchase', headerId: string, tota
     if (header) await createRelatedPago(kind, header as Row, total, estado)
     return
   }
-  const nextEstado = estado === 'Completada' ? 'Completada' : existing.estado
+  const nextEstado = estado === 'Completada' || estado === 'Pagada' ? 'Completada' : existing.estado
   await client.from('pagos').update({ monto: total, estado: nextEstado }).eq('id', existing.id)
 }
 
@@ -475,38 +619,116 @@ export async function insertSaleWithLines(input: RecordInput, lines: LineInput[]
   return toRecord('sales', headerRow)
 }
 
+type CatalogRow = { id: string; nombre: string; detalle: string; costo: number; producto_id: string | null }
+
+async function getCatalogRows(ids: string[]): Promise<Map<string, CatalogRow>> {
+  const unique = [...new Set(ids)]
+  if (!unique.length) return new Map()
+  const { data, error } = await requireSupabase()
+    .from('proveedor_productos')
+    .select('id, nombre, detalle, costo, producto_id')
+    .in('id', unique)
+  if (error) throw error
+  return new Map(
+    (data as Array<{ id: string; nombre: string; detalle: string; costo: number; producto_id: string | null }>).map((row) => [
+      row.id,
+      { id: row.id, nombre: String(row.nombre), detalle: String(row.detalle ?? ''), costo: Number(row.costo), producto_id: row.producto_id },
+    ]),
+  )
+}
+
+async function assertCatalogLines(lines: LineInput[]): Promise<Map<string, CatalogRow>> {
+  const catalog = await getCatalogRows(lines.map((line) => line.producto_id))
+  for (const line of lines) {
+    if (!catalog.has(line.producto_id)) throw new Error('Un producto del catálogo ya no existe. Recarga y vuelve a elegir.')
+  }
+  return catalog
+}
+
+/**
+ * Ingresa unidades a MI inventario desde el catálogo del proveedor: si el
+ * producto ya existe suma stock; si es nuevo lo crea (precio inicial = costo)
+ * y lo vincula para futuras compras. El kardex se genera solo por trigger.
+ */
+async function ingressCatalogLines(lines: LineInput[], catalog: Map<string, CatalogRow>): Promise<void> {
+  for (const line of lines) {
+    const entry = catalog.get(line.producto_id)
+    if (!entry) throw new Error('Un producto del catálogo ya no existe. Recarga y vuelve a elegir.')
+    if (entry.producto_id) {
+      const stocks = await getStocks([entry.producto_id])
+      await setStock(entry.producto_id, (stocks.get(entry.producto_id) ?? 0) + line.cantidad)
+    } else {
+      const { data, error } = await requireSupabase()
+        .from('productos')
+        .insert({
+          nombre: entry.nombre,
+          detalle: entry.detalle || `Ingresado por compra · ${entry.nombre}`,
+          stock: line.cantidad,
+          precio: line.precio,
+          estado: 'Estable',
+        })
+        .select('*')
+        .single()
+      if (error) throw error
+      const newId = String((data as Row).id)
+      const { error: linkError } = await requireSupabase()
+        .from('proveedor_productos')
+        .update({ producto_id: newId })
+        .eq('id', entry.id)
+      if (linkError) throw linkError
+      entry.producto_id = newId
+    }
+  }
+}
+
+/** Revierte un ingreso previo (al reabrir una compra completada). */
+async function revertCatalogLines(lines: LineInput[], catalog: Map<string, CatalogRow>): Promise<void> {
+  const mapped = lines.filter((line) => catalog.get(line.producto_id)?.producto_id)
+  const labels = await getProductLabels(mapped.map((line) => catalog.get(line.producto_id)?.producto_id as string))
+  for (const line of lines) {
+    const entry = catalog.get(line.producto_id)
+    if (!entry?.producto_id) continue
+    const stocks = await getStocks([entry.producto_id])
+    const available = stocks.get(entry.producto_id) ?? 0
+    if (line.cantidad > available) {
+      const name = labels.get(entry.producto_id) ?? entry.nombre
+      throw new Error(`No se puede reabrir: "${name}" solo tiene ${available} und. en inventario (parte ya se vendió).`)
+    }
+    await setStock(entry.producto_id, available - line.cantidad)
+  }
+}
+
 export async function insertPurchaseWithLines(input: RecordInput, lines: LineInput[]): Promise<RecordItem> {
   assertValidLines(lines)
   const client = requireSupabase()
   const total = lines.length ? lineTotal(lines) : (input.amount ?? 0)
   const headerInput: RecordInput = { ...input, amount: total }
+  // Las líneas referencian al CATÁLOGO del proveedor, no a mi inventario.
+  const catalog = await assertCatalogLines(lines)
 
   const { data: header, error: headerError } = await client.from('compras').insert(toRow('purchases', headerInput)).select('*').single()
   if (headerError) throw headerError
   const headerRow = header as Row
 
-  // El inventario solo se mueve al completar: mientras la compra está
-  // Pendiente / En curso / En tránsito las unidades están "por ingresar".
-  const completesNow = input.status === 'Completada'
+  // El inventario solo se mueve al llegar a Recepción (o más): mientras la orden
+  // está en Solicitud u Orden, las unidades están "por ingresar".
+  const ingressNow = purchaseHasStock(input.status)
+  // La cuenta por pagar incluye IGV (total a pagar al proveedor).
+  const pagoTotal = totalWithIgv(total)
   try {
     if (lines.length) {
       const { error: linesError } = await client.from('detalle_compras').insert(
         lines.map((line) => ({
           compra_id: String(headerRow.id),
-          producto_id: line.producto_id,
+          proveedor_producto_id: line.producto_id,
           cantidad: line.cantidad,
           costo_unitario: line.precio,
         })),
       )
       if (linesError) throw linesError
-      if (completesNow) {
-        const stocks = await getStocks(lines.map((line) => line.producto_id))
-        for (const line of lines) {
-          await setStock(line.producto_id, (stocks.get(line.producto_id) ?? 0) + line.cantidad)
-        }
-      }
+      if (ingressNow) await ingressCatalogLines(lines, catalog)
     }
-    await createRelatedPago('purchase', headerRow, total, input.status)
+    await createRelatedPago('purchase', headerRow, pagoTotal, input.status)
   } catch (error) {
     await client.from('detalle_compras').delete().eq('compra_id', String(headerRow.id))
     await client.from('compras').delete().eq('id', String(headerRow.id))
@@ -589,10 +811,13 @@ export async function updatePurchaseWithLines(code: string, input: RecordInput, 
   const { data: current, error: currentError } = await client.from('compras').select('*').eq('codigo', code).single()
   if (currentError) throw currentError
   const headerId = String((current as Row).id)
-  const wasCompleted = String((current as Row).estado) === 'Completada'
-  const becomesCompleted = input.status === 'Completada'
+  const hadStock = purchaseHasStock(String((current as Row).estado))
+  const hasStock = purchaseHasStock(input.status)
   const oldLines = await fetchDocumentLines('purchases', headerId)
+  // Las líneas (viejas y nuevas) referencian al catálogo del proveedor.
+  const catalog = await assertCatalogLines([...oldLines, ...lines].map((line) => ({ producto_id: line.producto_id, cantidad: 1, precio: 0 })))
   const total = lines.length ? lineTotal(lines) : (input.amount ?? Number((current as Row).monto ?? 0))
+  const pagoTotal = totalWithIgv(total)
 
   const { data: updated, error: updateError } = await client
     .from('compras')
@@ -603,32 +828,129 @@ export async function updatePurchaseWithLines(code: string, input: RecordInput, 
   if (updateError) throw updateError
 
   await client.from('detalle_compras').delete().eq('compra_id', headerId)
-  // Stock según transición de estado:
-  // - pendiente→completada: ingresa lo nuevo (+new).
-  // - completada→pendiente: revierte lo anterior (−old, valida stock suficiente).
-  // - completada→completada: ajusta la diferencia (new − old).
-  // - pendiente→pendiente: sin movimiento (seguimiento puro).
-  const deltas = new Map<string, number>()
-  if (!wasCompleted && becomesCompleted) {
-    for (const line of lines) deltas.set(line.producto_id, (deltas.get(line.producto_id) ?? 0) + line.cantidad)
-  } else if (wasCompleted && !becomesCompleted) {
+  // Ingreso a MI inventario según transición de fase (las líneas son del catálogo):
+  // - sin stock→con stock (ej. Orden→Recepción): ingresa lo nuevo.
+  // - con stock→sin stock: revierte lo anterior (valida que no se haya vendido).
+  // - con stock→con stock: ajusta la diferencia por ítem del catálogo.
+  // - sin stock→sin stock: sin movimiento (seguimiento puro).
+  if (!hadStock && hasStock) {
+    await ingressCatalogLines(lines, catalog)
+  } else if (hadStock && !hasStock) {
+    await revertCatalogLines(oldLines, catalog)
+  } else if (hadStock && hasStock) {
+    const deltas = new Map<string, number>()
     for (const line of oldLines) deltas.set(line.producto_id, (deltas.get(line.producto_id) ?? 0) - line.cantidad)
-  } else if (wasCompleted && becomesCompleted) {
-    for (const line of oldLines) deltas.set(line.producto_id, (deltas.get(line.producto_id) ?? 0) - line.cantidad)
     for (const line of lines) deltas.set(line.producto_id, (deltas.get(line.producto_id) ?? 0) + line.cantidad)
-  }
-  for (const [producto_id, delta] of deltas) {
-    if (!delta) continue
-    const { data } = await client.from('productos').select('stock').eq('id', producto_id).single()
-    const currentStock = Number((data as { stock: number } | null)?.stock ?? 0)
-    await setStock(producto_id, currentStock + delta)
+    for (const [catalogId, delta] of deltas) {
+      if (!delta) continue
+      const entry = catalog.get(catalogId)
+      if (!entry) throw new Error('Un producto del catálogo ya no existe. Recarga y vuelve a elegir.')
+      if (entry.producto_id) {
+        const stocks = await getStocks([entry.producto_id])
+        await setStock(entry.producto_id, (stocks.get(entry.producto_id) ?? 0) + delta)
+      } else if (delta > 0) {
+        await ingressCatalogLines([{ producto_id: catalogId, cantidad: delta, precio: lines.find((l) => l.producto_id === catalogId)?.precio ?? entry.costo }], catalog)
+      } else {
+        throw new Error(`No se puede ajustar "${entry.nombre}": aún no ingresa a inventario.`)
+      }
+    }
   }
   if (lines.length) {
     const { error: linesError } = await client.from('detalle_compras').insert(
-      lines.map((line) => ({ compra_id: headerId, producto_id: line.producto_id, cantidad: line.cantidad, costo_unitario: line.precio })),
+      lines.map((line) => ({ compra_id: headerId, proveedor_producto_id: line.producto_id, cantidad: line.cantidad, costo_unitario: line.precio })),
     )
     if (linesError) throw linesError
   }
-  await syncRelatedPago('purchase', headerId, total, input.status)
+  await syncRelatedPago('purchase', headerId, pagoTotal, input.status)
   return toRecord('purchases', updated as Row)
+}
+
+// -----------------------------------------------------------------------------
+// Cotizaciones: cabecera + líneas con precio fijo. No mueven stock ni generan
+// cobranza por sí solas; eso ocurre al convertirlas en venta.
+// -----------------------------------------------------------------------------
+
+export async function insertQuoteWithLines(input: RecordInput, lines: LineInput[]): Promise<RecordItem> {
+  assertValidLines(lines)
+  const client = requireSupabase()
+  const total = lines.length ? lineTotal(lines) : (input.amount ?? 0)
+  const { data: header, error: headerError } = await client.from('cotizaciones').insert(toRow('quotes', { ...input, amount: total })).select('*').single()
+  if (headerError) throw headerError
+  const headerRow = header as Row
+  try {
+    if (lines.length) {
+      const { error: linesError } = await client.from('detalle_cotizaciones').insert(
+        lines.map((line) => ({
+          cotizacion_id: String(headerRow.id),
+          producto_id: line.producto_id,
+          cantidad: line.cantidad,
+          precio_unitario: line.precio,
+        })),
+      )
+      if (linesError) throw linesError
+    }
+  } catch (error) {
+    await client.from('detalle_cotizaciones').delete().eq('cotizacion_id', String(headerRow.id))
+    await client.from('cotizaciones').delete().eq('id', String(headerRow.id))
+    throw error
+  }
+  return toRecord('quotes', headerRow)
+}
+
+export async function updateQuoteWithLines(code: string, input: RecordInput, lines: LineInput[]): Promise<RecordItem> {
+  assertValidLines(lines)
+  const client = requireSupabase()
+  const { data: current, error: currentError } = await client.from('cotizaciones').select('*').eq('codigo', code).single()
+  if (currentError) throw currentError
+  const wasCompleted = String((current as Row).estado) === 'Completada'
+  // Completada solo se alcanza convirtiendo en venta (genera stock y cobranza).
+  if (!wasCompleted && input.status === 'Completada') {
+    throw new Error('Para completar una cotización usa «Convertir en venta» desde la tabla.')
+  }
+  const headerId = String((current as Row).id)
+  const total = lines.length ? lineTotal(lines) : (input.amount ?? Number((current as Row).monto ?? 0))
+  const { data: updated, error: updateError } = await client
+    .from('cotizaciones')
+    .update(toRow('quotes', { ...input, amount: total }))
+    .eq('codigo', code)
+    .select('*')
+    .single()
+  if (updateError) throw updateError
+  await client.from('detalle_cotizaciones').delete().eq('cotizacion_id', headerId)
+  if (lines.length) {
+    const { error: linesError } = await client.from('detalle_cotizaciones').insert(
+      lines.map((line) => ({ cotizacion_id: headerId, producto_id: line.producto_id, cantidad: line.cantidad, precio_unitario: line.precio })),
+    )
+    if (linesError) throw linesError
+  }
+  return toRecord('quotes', updated as Row)
+}
+
+/** Convierte una cotización aprobada/pendiente en venta: descuenta stock, genera CxC y la marca Completada. */
+export async function convertQuoteToSale(code: string): Promise<{ sale: RecordItem }> {
+  const client = requireSupabase()
+  const { data: header, error: headerError } = await client.from('cotizaciones').select('*').eq('codigo', code).single()
+  if (headerError) throw headerError
+  const headerRow = header as Row
+  const estado = String(headerRow.estado)
+  if (estado === 'Completada') throw new Error('La cotización ya fue convertida en venta.')
+  if (estado === 'Rechazada' || estado === 'Vencida') {
+    throw new Error('Solo se pueden convertir cotizaciones pendientes, en curso o aprobadas.')
+  }
+  const headerId = String(headerRow.id)
+  const quoteLines = await fetchDocumentLines('quotes', headerId)
+  if (!quoteLines.length) throw new Error('La cotización no tiene productos para convertir.')
+  const lines: LineInput[] = quoteLines.map((line) => ({ producto_id: line.producto_id, cantidad: line.cantidad, precio: line.precio }))
+  const sale = await insertSaleWithLines(
+    {
+      name: String(headerRow.cliente_nombre),
+      detail: `Convertida de ${code}${headerRow.detalle ? ` · ${String(headerRow.detalle)}` : ''}`,
+      status: 'Pendiente',
+      cliente_id: (headerRow.cliente_id as string | null) ?? null,
+    },
+    lines,
+  )
+  const { error: updateError } = await client.from('cotizaciones').update({ estado: 'Completada' }).eq('id', headerId)
+  if (updateError) throw updateError
+  return { sale }
 }

@@ -3,6 +3,7 @@ import type { LucideIcon } from 'lucide-react'
 export type PageKey =
   | 'dashboard'
   | 'sales'
+  | 'quotes'
   | 'purchases'
   | 'inventory'
   | 'customers'
@@ -16,13 +17,21 @@ export type DataPage = Exclude<PageKey, 'dashboard'>
 export type Theme = 'dark' | 'light'
 export type RecordStatus =
   | 'Activo'
+  | 'Aprobada'
   | 'Bajo stock'
   | 'Completada'
   | 'Crítico'
   | 'En curso'
   | 'En tránsito'
   | 'Estable'
+  | 'Factura'
+  | 'Orden'
+  | 'Pagada'
   | 'Pendiente'
+  | 'Recepción'
+  | 'Rechazada'
+  | 'Solicitud'
+  | 'Vencida'
   | 'Vigente'
 
 export type RecordItem = {
@@ -37,10 +46,20 @@ export type RecordItem = {
   /** Productos: precio de venta referencial. undefined = columna aún no migrada o sin definir. */
   precio?: number
   status: RecordStatus
-  /** Ventas: UUID del cliente vinculado (clientes.id). NULL = sin vincular. */
+  /** Ventas/Cotizaciones: UUID del cliente vinculado (clientes.id). NULL = sin vincular. */
   cliente_id?: string | null
-  /** Compras / Productos: UUID del proveedor vinculado (proveedores.id). NULL = sin vincular. */
+  /** Compras: UUID del proveedor vinculado (proveedores.id). Catálogo: proveedor dueño. NULL = sin vincular. */
   proveedor_id?: string | null
+  /** Catálogo: UUID de MI producto equivalente en inventario (null = aún no ingresa). */
+  productoId?: string | null
+  /** Proveedores: RUC de 11 dígitos. NULL = sin registrar. */
+  ruc?: string | null
+  /** Compras: fecha límite o aproximada (YYYY-MM-DD). */
+  fechaLimite?: string | null
+  /** Compras: comprobante de recepción (Factura, Boleta, Guía de Remisión, Nota de Venta). */
+  comprobanteTipo?: string | null
+  /** Compras: número del comprobante de recepción. */
+  comprobanteNumero?: string | null
   /** Etiqueta legible del registro vinculado (razón social). Solo lectura. */
   relatedName?: string
   /** Código legible del registro vinculado (CLI-001 / PRV-082). Solo lectura. */

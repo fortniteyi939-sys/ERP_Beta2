@@ -29,6 +29,7 @@
 | Módulo de la app | Tabla |
 |---|---|
 | Ventas | `ventas` (+ `detalle_ventas`) |
+| Cotizaciones | `cotizaciones` (+ `detalle_cotizaciones`) |
 | Compras | `compras` (+ `detalle_compras`) |
 | Inventario | `productos` (+ `inventarios`, `movimientos_inventario` = kardex automático) |
 | Clientes / Proveedores | `clientes` / `proveedores` |
