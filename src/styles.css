@@ -1635,6 +1635,36 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .gicon.small { font-size: 16px; }
 .modal-close .gicon, .primary-button .gicon { font-size: 19px; }
 .gicon.login-spin { animation: gicon-spin 1s linear infinite; }
+
+/* ---- Visor de comprobantes (1 por venta/compra) ---- */
+.voucher-modal { width: min(620px, 100%); max-height: calc(100dvh - 40px); overflow-y: auto; overscroll-behavior: contain; margin: auto; padding: 24px; background: #131925; border: 1px solid rgba(255, 255, 255, .14); border-radius: 18px; box-shadow: 0 30px 80px rgba(0, 0, 0, .5); animation: modal-in .2s ease-out; }
+.voucher-modal .modal-actions { position: sticky; bottom: 0; padding: 12px 0 4px; background: #131925; border-top: 1px solid rgba(255, 255, 255, .08); }
+.voucher-paper { margin-top: 18px; padding: 22px; color: #111; background: #ffffff; border-radius: 12px; }
+.voucher-head { display: flex; justify-content: space-between; gap: 14px; border-bottom: 3px solid #111; padding-bottom: 12px; margin-bottom: 12px; }
+.voucher-head > div:first-child { display: grid; gap: 2px; align-content: start; }
+.voucher-head strong { font-size: 17px; }
+.voucher-head small, .voucher-meta small { color: #555; }
+.voucher-doc { border: 2px solid #111; padding: 8px 14px; display: grid; gap: 2px; text-align: center; }
+.voucher-doc strong { font-size: 16px; }
+.voucher-meta { display: grid; gap: 3px; margin-bottom: 12px; }
+.voucher-meta p { margin: 0; font-size: 12px; }
+.voucher-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.voucher-table th, .voucher-table td { padding: 8px; border: 1px solid #bbb; text-align: left; }
+.voucher-table th { background: #eee; }
+.voucher-table td:nth-child(1), .voucher-table td:nth-child(3), .voucher-table td:nth-child(4) { text-align: right; }
+.voucher-table td strong { display: block; }
+.voucher-table td small { color: #555; }
+.voucher-totals { width: 230px; margin: 12px 0 0 auto; display: grid; gap: 2px; font-size: 12px; }
+.voucher-totals div { display: flex; justify-content: space-between; padding: 3px 0; }
+.voucher-totals .grand { font-size: 15px; font-weight: 800; border-top: 2px solid #111; margin-top: 4px; padding-top: 8px; }
+.voucher-foot { margin: 14px 0 0; display: flex; align-items: center; gap: 8px; color: #555; font-size: 10px; }
+.erp-shell[data-theme='light'] .voucher-modal { background: #ffffff; border-color: #dce5ed; box-shadow: 0 28px 70px rgba(24, 41, 61, .22); }
+.erp-shell[data-theme='light'] .voucher-modal .modal-actions { background: #ffffff; border-color: #e7edf2; }
+.erp-shell[data-theme='light'] .voucher-modal .modal-heading h2 { color: #1a2b40; }
+.erp-shell[data-theme='light'] .voucher-modal .modal-heading p, .erp-shell[data-theme='light'] .voucher-modal .modal-fields label { color: #708195; }
+@media (max-width: 720px) {
+  .voucher-modal { width: 100%; padding: 20px 18px; }
+}
 @keyframes gicon-spin { to { transform: rotate(360deg); } }
 
 /* ---- Documentos con líneas (ventas/compras con productos) ---- */

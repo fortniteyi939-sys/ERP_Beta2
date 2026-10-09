@@ -13,6 +13,7 @@ import {
   Filter,
   Pencil,
   Plus,
+  Receipt,
   Search,
   ShoppingCart,
   SlidersHorizontal,
@@ -26,6 +27,7 @@ import { useRecords } from '../context/RecordsContext'
 import { deleteCatalogItem, fetchKardex, friendlyError, insertCatalogItem, updateCatalogItem, type KardexEntry } from '../services/records'
 import ConfirmModal from '../components/ConfirmModal'
 import PurchaseOrderDetail from '../components/PurchaseOrderDetail'
+import VoucherModal from '../components/VoucherModal'
 import type { DataPage, ExportFormat, RecordItem } from '../types'
 
 function kardexTone(tipo: KardexEntry['tipo']) {
@@ -45,6 +47,7 @@ function ModuloView({ page }: { page: DataPage }) {
   const { records, catalog, loading, openComposer, openEditor, requestDelete, exportTable, convertQuote, reload, notify } = useRecords()
   const navigate = useNavigate()
   const [converting, setConverting] = useState<RecordItem | null>(null)
+  const [voucher, setVoucher] = useState<{ page: 'sales' | 'purchases'; record: RecordItem } | null>(null)
   // Compras: orden seleccionada para ver su panel por fases.
   const [selectedPurchase, setSelectedPurchase] = useState<string | null>(null)
   const purchaseOrder = page === 'purchases' ? records.purchases.find((item) => item.id === selectedPurchase) ?? null : null
@@ -382,7 +385,7 @@ function ModuloView({ page }: { page: DataPage }) {
                   <td className="record-date">{item.date}</td>
                   <td className="record-value">{page === 'inventory' ? `${item.quantity ?? 0} und.${item.precio !== undefined ? ` · ${money(item.precio)}` : ''}` : page === 'documents' || page === 'reports' || page === 'settings' ? item.detail.split('·')[0].trim() : item.amount ? money(item.amount) : '—'}</td>
                   <td><span className={`status-pill ${statusTone(item.status)}`}>{item.status}</span></td>
-                  <td><div className="row-actions">{page === 'purchases' && <button className="row-action" type="button" aria-label={`Ver seguimiento de ${item.id}`} title="Ver seguimiento por fases" onClick={() => setSelectedPurchase(item.id)}><Eye size={15} /></button>}{page === 'quotes' && (item.status === 'Pendiente' || item.status === 'En curso' || item.status === 'Aprobada') && <button className="row-action convert" type="button" aria-label={`Convertir ${item.id} en venta`} title="Convertir en venta" onClick={() => setConverting(item)}><ShoppingCart size={15} /></button>}{page === 'suppliers' && <button className="row-action" type="button" aria-label={supplierOpen ? `Ocultar catálogo de ${item.name}` : `Ver catálogo que ofrece ${item.name}`} title={`Catálogo que ofrece (${offered.length})`} aria-expanded={supplierOpen} onClick={() => { setExpandedSupplier(supplierOpen ? null : supplierKey); resetCatForm() }}>{supplierOpen ? <ChevronUp size={15} /> : <ChevronDown size={15} />}</button>}<button className="row-action edit" type="button" aria-label={`Editar ${item.name}`} title="Editar" onClick={() => openEditor(page, item)}><Pencil size={15} /></button><button className="row-action delete" type="button" aria-label={`Eliminar ${item.name}`} title="Eliminar" onClick={() => requestDelete(page, item)}><Trash2 size={15} /></button></div></td>
+                  <td><div className="row-actions">{(page === 'sales' || page === 'purchases') && <button className="row-action" type="button" aria-label={`Ver comprobante de ${item.id}`} title="Ver comprobante" onClick={() => setVoucher({ page, record: item })}><Receipt size={15} /></button>}{page === 'purchases' && <button className="row-action" type="button" aria-label={`Ver seguimiento de ${item.id}`} title="Ver seguimiento por fases" onClick={() => setSelectedPurchase(item.id)}><Eye size={15} /></button>}{page === 'quotes' && (item.status === 'Pendiente' || item.status === 'En curso' || item.status === 'Aprobada') && <button className="row-action convert" type="button" aria-label={`Convertir ${item.id} en venta`} title="Convertir en venta" onClick={() => setConverting(item)}><ShoppingCart size={15} /></button>}{page === 'suppliers' && <button className="row-action" type="button" aria-label={supplierOpen ? `Ocultar catálogo de ${item.name}` : `Ver catálogo que ofrece ${item.name}`} title={`Catálogo que ofrece (${offered.length})`} aria-expanded={supplierOpen} onClick={() => { setExpandedSupplier(supplierOpen ? null : supplierKey); resetCatForm() }}>{supplierOpen ? <ChevronUp size={15} /> : <ChevronDown size={15} />}</button>}<button className="row-action edit" type="button" aria-label={`Editar ${item.name}`} title="Editar" onClick={() => openEditor(page, item)}><Pencil size={15} /></button><button className="row-action delete" type="button" aria-label={`Eliminar ${item.name}`} title="Eliminar" onClick={() => requestDelete(page, item)}><Trash2 size={15} /></button></div></td>
                 </tr>
                 {supplierOpen && (
                 <tr key={`${item.id}-ofrece`}>
@@ -495,6 +498,9 @@ function ModuloView({ page }: { page: DataPage }) {
           onCancel={() => setDeletingCatalog(null)}
           onConfirm={confirmCatalogDelete}
         />
+      )}
+      {voucher && (
+        <VoucherModal page={voucher.page} record={voucher.record} onClose={() => setVoucher(null)} />
       )}
     </>
   )

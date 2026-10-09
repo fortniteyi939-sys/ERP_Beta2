@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { igvOf, money, statusTone, totalWithIgv } from '../data/helpers'
 import { useRecords } from '../context/RecordsContext'
 import { fetchDocumentLines, friendlyError, updatePurchaseWithLines } from '../services/records'
+import VoucherModal from './VoucherModal'
 import type { DocumentLine, RecordItem, RecordStatus } from '../types'
 
 /** Icono de Google (Material Symbols Outlined). */
@@ -49,6 +50,7 @@ export default function PurchaseOrderDetail({ order, onBack }: { order: RecordIt
   const [fecha, setFecha] = useState(order.fechaLimite ?? '')
   const [compTipo, setCompTipo] = useState(order.comprobanteTipo ?? 'Factura')
   const [compNum, setCompNum] = useState(order.comprobanteNumero ?? '')
+  const [showVoucher, setShowVoucher] = useState(false)
 
   useEffect(() => {
     setFecha(order.fechaLimite ?? '')
@@ -113,8 +115,12 @@ export default function PurchaseOrderDetail({ order, onBack }: { order: RecordIt
     <>
       <div className="po-topbar">
         <button className="text-button" type="button" onClick={onBack}><GoogleIcon name="arrow_back" className="small" /> Volver a compras</button>
-        <span className={`status-pill ${statusTone(order.status)}`}>{order.status}</span>
+        <span style={{ display: 'inline-flex', gap: '8px', alignItems: 'center' }}>
+          <button className="export-button" type="button" onClick={() => setShowVoucher(true)}><GoogleIcon name="receipt_long" className="small" /> Ver comprobante</button>
+          <span className={`status-pill ${statusTone(order.status)}`}>{order.status}</span>
+        </span>
       </div>
+      {showVoucher && <VoucherModal page="purchases" record={order} onClose={() => setShowVoucher(false)} />}
 
       <section className="po-head panel">
         <div>
