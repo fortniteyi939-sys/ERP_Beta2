@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { pageMeta } from '../data/catalog'
 import { defaultStatus, escapeCell, isStockAlert } from '../data/helpers'
-import { deleteRecord, emptyRecords, fetchAllRecords, friendlyError, insertRecord, updateRecord, updateStatuses } from '../services/records'
+import { deleteRecord, emptyRecords, fetchAllRecords, fetchDocumentLines, friendlyError, insertPurchaseWithLines, insertRecord, insertSaleWithLines, updatePurchaseWithLines, updateRecord, updateSaleWithLines, updateStatuses, type LineInput } from '../services/records'
 import { useAuth } from './AuthContext'
 import type { DataPage, ExportFormat, PendingDelete, RecordItem, RecordModalState, RecordStatus } from '../types'
 
@@ -98,28 +98,118 @@ export function RecordsProvider({ children }: { children: ReactNode }) {
     const quantityInput = String(form.get('quantity') ?? '')
     const amount = Number(amountInput)
     const quantity = Number(quantityInput)
-    const name = String(form.get('name') ?? '').trim()
+    const rawRelated = String(form.get('related_id') ?? '')
+    // '' = sin vínculo (opcional). UUID = vínculo a cliente/proveedor registrado.
+    // undefined = el módulo no tiene relación (no se envía la columna).
+    const relatedId: string | null | undefined =
+      page === 'sales' || page === 'purchases' || page === 'inventory'
+        ? (rawRelated ? rawRelated : null)
+        : undefined
+    let name = String(form.get('name') ?? '').trim()
     const detail = String(form.get('detail') ?? '').trim()
     const selectedStatus = String(form.get('status') ?? defaultStatus(page)) as RecordStatus
     const savedAmount = meta.kind === 'money' && amountInput !== '' && Number.isFinite(amount) && amount >= 0 ? amount : record?.amount
     const savedQuantity = meta.kind === 'stock' && quantityInput !== '' && Number.isFinite(quantity) && quantity >= 0 ? Math.floor(quantity) : record?.quantity
+    // Precio del producto (inventario). Si viene vacío se conserva el anterior; si no hay anterior, queda undefined (no toca la columna).
+    const precioInput = String(form.get('precio') ?? '')
+    const precioNumber = Number(precioInput)
+    const savedPrecio = page === 'inventory' && precioInput !== '' && Number.isFinite(precioNumber) && precioNumber >= 0
+      ? Math.round(precioNumber * 100) / 100
+      : record?.precio
+    // Si se eligió un cliente/proveedor registrado, el nombre se hereda de ese
+    // registro para que cliente_nombre/proveedor_nombre y la FK queden coherentes.
+    // El trigger vincular_cliente/vincular_proveedor queda como respaldo.
+    if (relatedId) {
+      if (page === 'sales') {
+        const target = records.customers.find((item) => item.rowId === relatedId)
+        if (target) name = target.name
+      } else {
+        const target = records.suppliers.find((item) => item.rowId === relatedId)
+        if (target) name = target.name
+      }
+    }
+    // Líneas de productos (solo ventas/compras): inputs qty_<uuid> + price_<uuid>
+    // marcados con sel_<uuid>. Si no hay ninguna marcada, se guarda cabecera simple.
+    const lines: LineInput[] = []
+    if (page === 'sales' || page === 'purchases') {
+      for (const product of records.inventory) {
+        const uuid = product.rowId
+        if (!uuid) continue
+        if (!form.get(`sel_${uuid}`)) continue
+        const qty = Math.floor(Number(String(form.get(`qty_${uuid}`) ?? '')))
+        const price = Number(String(form.get(`price_${uuid}`) ?? ''))
+        if (!Number.isFinite(qty) || qty <= 0) throw new Error(`Cantidad inválida para ${product.name}.`)
+        if (!Number.isFinite(price) || price < 0) throw new Error(`Precio inválido para ${product.name}.`)
+        lines.push({ producto_id: uuid, cantidad: qty, precio: price })
+      }
+    }
     const input = {
       name,
       detail,
       status: selectedStatus,
       ...(meta.kind === 'money' && savedAmount !== undefined ? { amount: savedAmount } : {}),
       ...(meta.kind === 'stock' && savedQuantity !== undefined ? { quantity: savedQuantity } : {}),
+      ...(page === 'inventory' && savedPrecio !== undefined ? { precio: savedPrecio } : {}),
+      ...(page === 'sales' && relatedId !== undefined ? { cliente_id: relatedId } : {}),
+      ...((page === 'purchases' || page === 'inventory') && relatedId !== undefined ? { proveedor_id: relatedId } : {}),
+    }
+    // Si hay líneas, el total manda sobre el monto manual.
+    if (lines.length) {
+      const total = lines.reduce((sum, line) => sum + line.cantidad * line.precio, 0)
+      ;(input as { amount?: number }).amount = total
     }
 
     setSaving(true)
     try {
-      const saved = record ? await updateRecord(page, record.id, input) : await insertRecord(page, input)
-      setRecords((current) => ({
-        ...current,
-        [page]: record ? current[page].map((currentRecord) => currentRecord.id === record.id ? saved : currentRecord) : [saved, ...current[page]],
-      }))
+      let saved: RecordItem
+      if (page === 'sales' && (lines.length || record)) {
+        // En ventas siempre se usa la ruta con líneas para recalcular stock/cobranza.
+        // Si se edita sin marcar líneas, se conservan las anteriores.
+        if (!lines.length && record?.rowId) {
+          const previous = await fetchDocumentLines('sales', record.rowId)
+          const previousInput: LineInput[] = previous.map((line) => ({ producto_id: line.producto_id, cantidad: line.cantidad, precio: line.precio }))
+          saved = record
+            ? await updateSaleWithLines(record.id, input, previousInput)
+            : await insertSaleWithLines(input, [])
+        } else {
+          saved = record
+            ? await updateSaleWithLines(record.id, input, lines)
+            : await insertSaleWithLines(input, lines)
+        }
+      } else if (page === 'purchases' && (lines.length || record)) {
+        if (!lines.length && record?.rowId) {
+          const previous = await fetchDocumentLines('purchases', record.rowId)
+          const previousInput: LineInput[] = previous.map((line) => ({ producto_id: line.producto_id, cantidad: line.cantidad, precio: line.precio }))
+          saved = record
+            ? await updatePurchaseWithLines(record.id, input, previousInput)
+            : await insertPurchaseWithLines(input, [])
+        } else {
+          saved = record
+            ? await updatePurchaseWithLines(record.id, input, lines)
+            : await insertPurchaseWithLines(input, lines)
+        }
+      } else {
+        saved = record ? await updateRecord(page, record.id, input) : await insertRecord(page, input)
+      }
+      // Ventas/compras mueven inventario y generan CxC/CxP: recarga todo para verlo.
+      if (page === 'sales' || page === 'purchases' || page === 'inventory') {
+        try {
+          setRecords(await fetchAllRecords())
+        } catch {
+          setRecords((current) => ({
+            ...current,
+            [page]: record ? current[page].map((currentRecord) => currentRecord.id === record.id ? saved : currentRecord) : [saved, ...current[page]],
+          }))
+        }
+      } else {
+        setRecords((current) => ({
+          ...current,
+          [page]: record ? current[page].map((currentRecord) => currentRecord.id === record.id ? saved : currentRecord) : [saved, ...current[page]],
+        }))
+      }
       setRecordModal(null)
-      notify(record ? `${meta.title}: registro actualizado.` : `${meta.title}: registro guardado en la base de datos.`)
+      const linesNote = lines.length ? ` (${lines.length} ${lines.length === 1 ? 'producto' : 'productos'}, stock y cobranza actualizados)` : ''
+      notify(record ? `${meta.title}: registro actualizado${linesNote}.` : `${meta.title}: registro guardado en la base de datos${linesNote}.`)
     } catch (error) {
       notify(friendlyError(error))
     } finally {

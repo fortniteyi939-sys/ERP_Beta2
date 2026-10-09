@@ -130,16 +130,28 @@ function ModuloView({ page }: { page: DataPage }) {
           <table className="record-table">
             <thead><tr><th>REFERENCIA</th><th>{page === 'documents' ? 'ARCHIVO' : 'DETALLE'}</th><th>ACTUALIZACIÓN</th><th>{page === 'inventory' ? 'STOCK' : page === 'documents' || page === 'reports' || page === 'settings' ? 'TIPO' : 'VALOR'}</th><th>ESTADO</th><th><span className="sr-only">Acciones</span></th></tr></thead>
             <tbody>
-              {filteredRecords.map((item) => (
+              {filteredRecords.map((item) => {
+                const linkedLabel = item.relatedName
+                  ? `${item.relatedName}${item.relatedCode ? ` · ${item.relatedCode}` : ''}`
+                  : null
+                const showRelation = page === 'sales' || page === 'purchases' || page === 'inventory'
+                return (
                 <tr key={item.id}>
                   <td><span className="record-id">{item.id}</span></td>
-                  <td><strong>{item.name}</strong><small>{item.detail}</small></td>
+                  <td><strong>{item.name}</strong><small>{item.detail}</small>
+                    {showRelation && (linkedLabel ? (
+                      <span className="linked-badge"><span className="gicon">link</span>{linkedLabel}</span>
+                    ) : (
+                      <span className="linked-badge muted"><span className="gicon">link_off</span>{page === 'inventory' ? 'Sin proveedor' : 'Sin vincular'}</span>
+                    ))}
+                  </td>
                   <td className="record-date">{item.date}</td>
-                  <td className="record-value">{page === 'inventory' ? `${item.quantity ?? 0} und.` : page === 'documents' || page === 'reports' || page === 'settings' ? item.detail.split('·')[0].trim() : item.amount ? money(item.amount) : '—'}</td>
+                  <td className="record-value">{page === 'inventory' ? `${item.quantity ?? 0} und.${item.precio !== undefined ? ` · ${money(item.precio)}` : ''}` : page === 'documents' || page === 'reports' || page === 'settings' ? item.detail.split('·')[0].trim() : item.amount ? money(item.amount) : '—'}</td>
                   <td><span className={`status-pill ${statusTone(item.status)}`}>{item.status}</span></td>
                   <td><div className="row-actions"><button className="row-action edit" type="button" aria-label={`Editar ${item.name}`} title="Editar" onClick={() => openEditor(page, item)}><Pencil size={15} /></button><button className="row-action delete" type="button" aria-label={`Eliminar ${item.name}`} title="Eliminar" onClick={() => requestDelete(page, item)}><Trash2 size={15} /></button></div></td>
                 </tr>
-              ))}
+                )
+              })}
               {!filteredRecords.length && <tr><td colSpan={6}><div className="empty-table"><Search size={20} />{loading ? <><strong>Cargando registros…</strong><span>Consultando la base de datos.</span></> : pageRecords.length ? <><strong>Sin coincidencias</strong><span>Ajusta la búsqueda o el estado para consultar otros registros.</span></> : <><strong>Aún no hay registros</strong><span>Crea el primero con el botón «{meta.action}».</span></>}</div></td></tr>}
             </tbody>
           </table>

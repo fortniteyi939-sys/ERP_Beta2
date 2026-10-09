@@ -1,5 +1,6 @@
 export type {
   DataPage,
+  DocumentLine,
   ExportFormat,
   PageKey,
   PageMeta,
