@@ -491,6 +491,15 @@ export default function RecordModal({ page, record, saving = false, onClose, onS
               )}
             </>
           )}
+          {page === 'purchases' && (
+            <>
+              <label>Fecha límite o aproximada<input type="date" name="fecha_limite" defaultValue={record?.fechaLimite ?? ''} /></label>
+              <small className="relation-hint">
+                <GoogleIcon name="event" className="small" />
+                La defines tú al crear la solicitud: fecha máxima o aproximada para concretar la compra. Se ve en el seguimiento.
+              </small>
+            </>
+          )}
           <label>Estado
             <select name="status" value={statusValue} onChange={(event) => setStatusValue(event.target.value as RecordStatus)}>
               {statusOptions.map((status) => <option key={status}>{status}</option>)}

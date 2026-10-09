@@ -143,6 +143,17 @@ export function RecordsProvider({ children }: { children: ReactNode }) {
     const savedPrecio = page === 'inventory' && precioInput !== '' && Number.isFinite(precioNumber) && precioNumber >= 0
       ? Math.round(precioNumber * 100) / 100
       : record?.precio
+    // Fecha límite de la compra: la define el comprador al crear la solicitud.
+    // Vacío = sin fecha (en edición conserva la anterior).
+    const fechaInput = String(form.get('fecha_limite') ?? '')
+    let savedFechaLimite = record?.fechaLimite
+    if (page === 'purchases' && fechaInput !== '') {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(fechaInput)) {
+        notify('La fecha límite no es válida.')
+        return
+      }
+      savedFechaLimite = fechaInput
+    }
     // RUC del proveedor: 11 dígitos obligatorios (identifica la empresa en cada orden).
     const rucDigits = String(form.get('ruc') ?? '').replace(/\D/g, '')
     if (page === 'suppliers' && !/^\d{11}$/.test(rucDigits)) {
@@ -193,6 +204,7 @@ export function RecordsProvider({ children }: { children: ReactNode }) {
       ...(meta.kind === 'money' && savedAmount !== undefined ? { amount: savedAmount } : {}),
       ...(meta.kind === 'stock' && savedQuantity !== undefined ? { quantity: savedQuantity } : {}),
       ...(page === 'inventory' && savedPrecio !== undefined ? { precio: savedPrecio } : {}),
+      ...(page === 'purchases' && savedFechaLimite !== undefined ? { fecha_limite: savedFechaLimite } : {}),
       ...(page === 'suppliers' ? { ruc: rucDigits } : {}),
       ...((page === 'sales' || page === 'quotes') && relatedId !== undefined ? { cliente_id: relatedId } : {}),
       ...(page === 'purchases' && relatedId !== undefined ? { proveedor_id: relatedId } : {}),
