@@ -245,6 +245,55 @@ export async function deleteRecord(page: DataPage, code: string): Promise<void> 
   if (!data || data.length === 0) throw { code: '42501', message: 'No se pudo eliminar el registro.' }
 }
 
+/** Movimiento del kardex: cada entrada/salida de un producto (se genera solo por trigger). */
+export type KardexEntry = {
+  id: string
+  producto_id: string | null
+  productoCodigo?: string
+  productoNombre?: string
+  tipo: 'entrada' | 'salida' | 'ajuste' | 'transferencia'
+  cantidad: number
+  stock_anterior: number | null
+  stock_nuevo: number | null
+  referencia?: string | null
+  created_at: string
+}
+
+/** Historial de movimientos de inventario, del más reciente al más antiguo. */
+export async function fetchKardex(productId: string | null = null, limit = 100): Promise<KardexEntry[]> {
+  const client = requireSupabase()
+  let query = client
+    .from('movimientos_inventario')
+    .select('id, producto_id, tipo, cantidad, stock_anterior, stock_nuevo, referencia, created_at, productos(codigo, nombre)')
+    .order('created_at', { ascending: false })
+    .limit(limit)
+  if (productId) query = query.eq('producto_id', productId)
+  const { data, error } = await query
+  if (error) throw error
+  return (data as unknown as Array<{
+    id: string
+    producto_id: string | null
+    tipo: KardexEntry['tipo']
+    cantidad: number
+    stock_anterior: number | null
+    stock_nuevo: number | null
+    referencia: string | null
+    created_at: string
+    productos: { codigo: string; nombre: string } | null
+  }>).map((row) => ({
+    id: String(row.id),
+    producto_id: row.producto_id,
+    productoCodigo: row.productos?.codigo,
+    productoNombre: row.productos?.nombre,
+    tipo: row.tipo,
+    cantidad: Number(row.cantidad),
+    stock_anterior: row.stock_anterior === null ? null : Number(row.stock_anterior),
+    stock_nuevo: row.stock_nuevo === null ? null : Number(row.stock_nuevo),
+    referencia: row.referencia,
+    created_at: String(row.created_at),
+  }))
+}
+
 export async function updateStatuses(page: DataPage, codes: string[], status: RecordStatus): Promise<RecordItem[]> {
   const { data, error } = await requireSupabase().from(pageConfig[page].table).update({ estado: status }).in('codigo', codes).select('*')
   if (error) throw error
@@ -316,6 +365,17 @@ async function getStocks(productIds: string[]): Promise<Map<string, number>> {
   return new Map((data as Array<{ id: string; stock: number }>).map((row) => [row.id, Number(row.stock)]))
 }
 
+async function getProductLabels(productIds: string[]): Promise<Map<string, string>> {
+  const client = requireSupabase()
+  const unique = [...new Set(productIds)]
+  if (!unique.length) return new Map()
+  const { data } = await client.from('productos').select('id, codigo, nombre').in('id', unique)
+  if (!data) return new Map()
+  return new Map(
+    (data as Array<{ id: string; codigo: string; nombre: string }>).map((row) => [row.id, `${row.nombre} (${row.codigo})`]),
+  )
+}
+
 async function setStock(producto_id: string, nuevo: number): Promise<void> {
   if (!Number.isInteger(nuevo) || nuevo < 0) throw new Error('El stock resultante no puede ser negativo.')
   const { error } = await requireSupabase().from('productos').update({ stock: nuevo }).eq('id', producto_id)
@@ -371,12 +431,14 @@ export async function insertSaleWithLines(input: RecordInput, lines: LineInput[]
   const headerInput: RecordInput = { ...input, amount: total }
 
   // 1. Valida stock antes de tocar nada (evita dejar la venta a medias).
+  // Nunca permite vender más del disponible: el formulario lo topa y aquí se revalida.
   const stocks = await getStocks(lines.map((line) => line.producto_id))
+  const labels = await getProductLabels(lines.map((line) => line.producto_id))
   for (const line of lines) {
     const available = stocks.get(line.producto_id) ?? 0
     if (line.cantidad > available) {
-      const name = line.producto_id
-      throw new Error(`Stock insuficiente para ${name}: disponible ${available}, pedido ${line.cantidad}.`)
+      const name = labels.get(line.producto_id) ?? line.producto_id
+      throw new Error(`Stock insuficiente para ${name}: disponible ${available}, pedido ${line.cantidad}. Reduce la cantidad.`)
     }
   }
 
@@ -423,6 +485,9 @@ export async function insertPurchaseWithLines(input: RecordInput, lines: LineInp
   if (headerError) throw headerError
   const headerRow = header as Row
 
+  // El inventario solo se mueve al completar: mientras la compra está
+  // Pendiente / En curso / En tránsito las unidades están "por ingresar".
+  const completesNow = input.status === 'Completada'
   try {
     if (lines.length) {
       const { error: linesError } = await client.from('detalle_compras').insert(
@@ -434,9 +499,11 @@ export async function insertPurchaseWithLines(input: RecordInput, lines: LineInp
         })),
       )
       if (linesError) throw linesError
-      const stocks = await getStocks(lines.map((line) => line.producto_id))
-      for (const line of lines) {
-        await setStock(line.producto_id, (stocks.get(line.producto_id) ?? 0) + line.cantidad)
+      if (completesNow) {
+        const stocks = await getStocks(lines.map((line) => line.producto_id))
+        for (const line of lines) {
+          await setStock(line.producto_id, (stocks.get(line.producto_id) ?? 0) + line.cantidad)
+        }
       }
     }
     await createRelatedPago('purchase', headerRow, total, input.status)
@@ -477,9 +544,13 @@ export async function updateSaleWithLines(code: string, input: RecordInput, line
       effective.set(id, (newStocks.get(id) ?? 0) + oldQty)
     }
   }
+  const editLabels = await getProductLabels(lines.map((line) => line.producto_id))
   for (const line of lines) {
     const available = effective.get(line.producto_id) ?? 0
-    if (line.cantidad > available) throw new Error(`Stock insuficiente: disponible ${available}, pedido ${line.cantidad}.`)
+    if (line.cantidad > available) {
+      const name = editLabels.get(line.producto_id) ?? line.producto_id
+      throw new Error(`Stock insuficiente para ${name}: disponible ${available}, pedido ${line.cantidad}. Reduce la cantidad.`)
+    }
   }
 
   const total = lines.length ? lineTotal(lines) : (input.amount ?? Number((current as Row).monto ?? 0))
@@ -518,6 +589,8 @@ export async function updatePurchaseWithLines(code: string, input: RecordInput, 
   const { data: current, error: currentError } = await client.from('compras').select('*').eq('codigo', code).single()
   if (currentError) throw currentError
   const headerId = String((current as Row).id)
+  const wasCompleted = String((current as Row).estado) === 'Completada'
+  const becomesCompleted = input.status === 'Completada'
   const oldLines = await fetchDocumentLines('purchases', headerId)
   const total = lines.length ? lineTotal(lines) : (input.amount ?? Number((current as Row).monto ?? 0))
 
@@ -530,10 +603,20 @@ export async function updatePurchaseWithLines(code: string, input: RecordInput, 
   if (updateError) throw updateError
 
   await client.from('detalle_compras').delete().eq('compra_id', headerId)
-  // Diferencia neta: antes sumaba old, ahora suma new → delta = new - old.
+  // Stock según transición de estado:
+  // - pendiente→completada: ingresa lo nuevo (+new).
+  // - completada→pendiente: revierte lo anterior (−old, valida stock suficiente).
+  // - completada→completada: ajusta la diferencia (new − old).
+  // - pendiente→pendiente: sin movimiento (seguimiento puro).
   const deltas = new Map<string, number>()
-  for (const line of oldLines) deltas.set(line.producto_id, (deltas.get(line.producto_id) ?? 0) - line.cantidad)
-  for (const line of lines) deltas.set(line.producto_id, (deltas.get(line.producto_id) ?? 0) + line.cantidad)
+  if (!wasCompleted && becomesCompleted) {
+    for (const line of lines) deltas.set(line.producto_id, (deltas.get(line.producto_id) ?? 0) + line.cantidad)
+  } else if (wasCompleted && !becomesCompleted) {
+    for (const line of oldLines) deltas.set(line.producto_id, (deltas.get(line.producto_id) ?? 0) - line.cantidad)
+  } else if (wasCompleted && becomesCompleted) {
+    for (const line of oldLines) deltas.set(line.producto_id, (deltas.get(line.producto_id) ?? 0) - line.cantidad)
+    for (const line of lines) deltas.set(line.producto_id, (deltas.get(line.producto_id) ?? 0) + line.cantidad)
+  }
   for (const [producto_id, delta] of deltas) {
     if (!delta) continue
     const { data } = await client.from('productos').select('stock').eq('id', producto_id).single()

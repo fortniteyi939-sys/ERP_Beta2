@@ -118,8 +118,9 @@ export function RecordsProvider({ children }: { children: ReactNode }) {
       : record?.precio
     // Si se eligió un cliente/proveedor registrado, el nombre se hereda de ese
     // registro para que cliente_nombre/proveedor_nombre y la FK queden coherentes.
+    // En productos NO se hereda: el nombre es propio del producto, solo se vincula.
     // El trigger vincular_cliente/vincular_proveedor queda como respaldo.
-    if (relatedId) {
+    if (relatedId && page !== 'inventory') {
       if (page === 'sales') {
         const target = records.customers.find((item) => item.rowId === relatedId)
         if (target) name = target.name
@@ -139,7 +140,7 @@ export function RecordsProvider({ children }: { children: ReactNode }) {
         const qty = Math.floor(Number(String(form.get(`qty_${uuid}`) ?? '')))
         const price = Number(String(form.get(`price_${uuid}`) ?? ''))
         if (!Number.isFinite(qty) || qty <= 0) throw new Error(`Cantidad inválida para ${product.name}.`)
-        if (!Number.isFinite(price) || price < 0) throw new Error(`Precio inválido para ${product.name}.`)
+        if (!Number.isFinite(price) || price <= 0) throw new Error(`"${product.name}" no tiene precio definido. Defínelo en Inventario antes de guardar.`)
         lines.push({ producto_id: uuid, cantidad: qty, precio: price })
       }
     }
@@ -209,7 +210,19 @@ export function RecordsProvider({ children }: { children: ReactNode }) {
       }
       setRecordModal(null)
       const linesNote = lines.length ? ` (${lines.length} ${lines.length === 1 ? 'producto' : 'productos'}, stock y cobranza actualizados)` : ''
-      notify(record ? `${meta.title}: registro actualizado${linesNote}.` : `${meta.title}: registro guardado en la base de datos${linesNote}.`)
+      // Si la BD aún no tiene las columnas nuevas, el guardado las descarta en
+      // silencio (push-safety): se avisa para que se ejecuten las migraciones.
+      let migrationNote = ''
+      if (page === 'inventory') {
+        const wantedPrecio = (input as { precio?: number }).precio !== undefined
+        const wantedSupplier = (input as { proveedor_id?: string | null }).proveedor_id
+        if (wantedPrecio && saved.precio === undefined) {
+          migrationNote = ' Sin precio: falta ejecutar la migración 20261011000000_producto_precio.sql en Supabase.'
+        } else if (wantedSupplier && !saved.proveedor_id) {
+          migrationNote = ' Sin proveedor vinculado: falta ejecutar la migración 20261010000000_producto_proveedor.sql en Supabase.'
+        }
+      }
+      notify(record ? `${meta.title}: registro actualizado${linesNote}.${migrationNote}` : `${meta.title}: registro guardado en la base de datos${linesNote}.${migrationNote}`)
     } catch (error) {
       notify(friendlyError(error))
     } finally {

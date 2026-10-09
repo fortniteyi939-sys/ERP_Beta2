@@ -17,9 +17,16 @@ import {
   Trash2,
 } from 'lucide-react'
 import { DATA_PAGES, pageMeta } from '../data/catalog'
-import { money, statusTone } from '../data/helpers'
+import { formatWhen, money, statusTone } from '../data/helpers'
 import { useRecords } from '../context/RecordsContext'
+import { fetchKardex, friendlyError, type KardexEntry } from '../services/records'
 import type { DataPage, ExportFormat } from '../types'
+
+function kardexTone(tipo: KardexEntry['tipo']) {
+  if (tipo === 'entrada') return 'green'
+  if (tipo === 'salida') return 'amber'
+  return 'blue'
+}
 
 export default function ModuloPage() {
   const { pageId } = useParams()
@@ -38,6 +45,29 @@ function ModuloView({ page }: { page: DataPage }) {
   const statusFilter = searchParams.get('status') ?? 'Todos'
   const [exportOpen, setExportOpen] = useState(false)
   const exportRef = useRef<HTMLDivElement>(null)
+  // Kardex: historial de movimientos del inventario (solo en este módulo).
+  const isInventory = page === 'inventory'
+  const [view, setView] = useState<'registros' | 'kardex'>('registros')
+  const [kardexProduct, setKardexProduct] = useState('')
+  const [kardexTipo, setKardexTipo] = useState('Todos')
+  const [kardex, setKardex] = useState<KardexEntry[]>([])
+  const [kardexLoading, setKardexLoading] = useState(false)
+  const [kardexError, setKardexError] = useState('')
+  const [kardexNonce, setKardexNonce] = useState(0)
+
+  useEffect(() => {
+    if (!isInventory || view !== 'kardex') return
+    let active = true
+    setKardexLoading(true)
+    setKardexError('')
+    fetchKardex(kardexProduct || null)
+      .then((rows) => active && setKardex(rows))
+      .catch((error) => active && setKardexError(friendlyError(error)))
+      .finally(() => active && setKardexLoading(false))
+    return () => {
+      active = false
+    }
+  }, [isInventory, view, kardexProduct, kardexNonce])
 
   useEffect(() => {
     if (!exportOpen) return
@@ -80,6 +110,13 @@ function ModuloView({ page }: { page: DataPage }) {
     exportTable(page, format)
   }
 
+  const kardexFiltrado = useMemo(
+    () => kardex.filter((row) => kardexTipo === 'Todos' || row.tipo === kardexTipo),
+    [kardex, kardexTipo],
+  )
+  const kardexEntradas = kardexFiltrado.filter((row) => row.tipo === 'entrada').reduce((sum, row) => sum + row.cantidad, 0)
+  const kardexSalidas = kardexFiltrado.filter((row) => row.tipo === 'salida').reduce((sum, row) => sum + row.cantidad, 0)
+
   const statuses = Array.from(new Set(pageRecords.map((item) => item.status)))
   const filteredRecords = useMemo(() => pageRecords.filter((item) => {
     const matchesQuery = `${item.id} ${item.name} ${item.detail}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())
@@ -107,6 +144,53 @@ function ModuloView({ page }: { page: DataPage }) {
         <article><span className={critical ? 'summary-icon warning' : 'summary-icon success'}>{critical ? <AlertTriangle size={18} /> : <CircleCheck size={18} />}</span><div><small>{critical ? 'REQUIERE REVISIÓN' : 'ESTADO DEL MÓDULO'}</small><strong>{critical ? `${critical} alertas` : 'Operativo'}</strong></div></article>
       </section>
 
+      {isInventory && (
+        <div className="inventory-tabs">
+          <div className="segmented-control" role="tablist" aria-label="Vistas de inventario">
+            <button type="button" role="tab" aria-selected={view === 'registros'} className={view === 'registros' ? 'selected' : ''} onClick={() => setView('registros')}>Productos</button>
+            <button type="button" role="tab" aria-selected={view === 'kardex'} className={view === 'kardex' ? 'selected' : ''} onClick={() => setView('kardex')}>Kardex</button>
+          </div>
+          {view === 'kardex' && <span className="kardex-count">{kardexFiltrado.length} movimientos</span>}
+        </div>
+      )}
+
+      {isInventory && view === 'kardex' ? (
+      <section className="table-panel panel">
+        <div className="table-header">
+          <div><span className="panel-label">KARDEX DE INVENTARIO</span><h2>Historial de movimientos</h2></div>
+          <div className="table-actions">
+            <button className="export-button" type="button" onClick={() => setKardexNonce((n) => n + 1)}><span className="gicon small">refresh</span> Recargar</button>
+          </div>
+        </div>
+        <div className="kardex-summary">
+          <span className="kardex-chip in"><span className="gicon small">add_box</span> Entradas: {kardexEntradas} und.</span>
+          <span className="kardex-chip out"><span className="gicon small">remove_circle</span> Salidas: {kardexSalidas} und.</span>
+          <span className="kardex-note">Se genera solo con cada venta, compra o ajuste de stock.</span>
+        </div>
+        <div className="table-toolbar">
+          <label className="filter-select"><Filter size={16} /><select value={kardexProduct} onChange={(event) => setKardexProduct(event.target.value)}><option value="">Todos los productos</option>{pageRecords.map((item) => <option key={item.rowId ?? item.id} value={item.rowId ?? ''}>{item.name} · {item.id}</option>)}</select><ChevronDown size={14} /></label>
+          <label className="filter-select"><Filter size={16} /><select value={kardexTipo} onChange={(event) => setKardexTipo(event.target.value)}><option>Todos</option><option value="entrada">Entradas</option><option value="salida">Salidas</option><option value="ajuste">Ajustes</option><option value="transferencia">Transferencias</option></select><ChevronDown size={14} /></label>
+        </div>
+        <div className="table-scroll">
+          <table className="record-table">
+            <thead><tr><th>FECHA</th><th>PRODUCTO</th><th>TIPO</th><th>CANTIDAD</th><th>STOCK</th><th>REFERENCIA</th></tr></thead>
+            <tbody>
+              {kardexFiltrado.map((row) => (
+                <tr key={row.id}>
+                  <td className="record-date">{formatWhen(row.created_at)}</td>
+                  <td><strong>{row.productoNombre ?? 'Producto eliminado'}</strong><small>{row.productoCodigo ?? row.producto_id ?? '—'}</small></td>
+                  <td><span className={`status-pill ${kardexTone(row.tipo)}`}>{row.tipo}</span></td>
+                  <td className={row.tipo === 'entrada' ? 'kardex-qty-in' : row.tipo === 'salida' ? 'kardex-qty-out' : 'record-value'}>{row.tipo === 'entrada' ? `+${row.cantidad}` : row.tipo === 'salida' ? `−${row.cantidad}` : row.cantidad} und.</td>
+                  <td className="record-date">{row.stock_anterior ?? '—'} → {row.stock_nuevo ?? '—'}</td>
+                  <td><span className="record-id">{row.referencia ?? '—'}</span></td>
+                </tr>
+              ))}
+              {!kardexFiltrado.length && <tr><td colSpan={6}><div className="empty-table"><Search size={20} />{kardexLoading ? <><strong>Cargando kardex…</strong><span>Consultando los movimientos.</span></> : kardexError ? <><strong>Sin acceso al kardex</strong><span>{kardexError}</span></> : <><strong>Sin movimientos</strong><span>Vende, compra o ajusta stock y aparecerán aquí solos.</span></>}</div></td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      ) : (
       <section className="table-panel panel">
         <div className="table-header">
           <div><span className="panel-label">REGISTRO OPERATIVO</span><h2>Información conectada</h2></div>
@@ -157,6 +241,7 @@ function ModuloView({ page }: { page: DataPage }) {
           </table>
         </div>
       </section>
+      )}
     </>
   )
 }
